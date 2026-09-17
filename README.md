@@ -232,7 +232,8 @@ Further out: adaptive per entry thresholds instead of one global constant, a rer
 Work in progress. Planning is done and implementation hasn't started.
 
 - [x] Product requirements, architecture, API contract and design decisions written up
-- [ ] Repository scaffold and Compose stack
+- [x] Repository scaffold: every module, test and config file in place, commented, no logic yet
+- [ ] Compose stack filled in
 - [ ] OpenAI compatible endpoint and schema validation
 - [ ] Tier 1 exact match cache
 - [ ] Provider adapter, token counting and cost computation
@@ -245,17 +246,97 @@ Work in progress. Planning is done and implementation hasn't started.
 - [ ] Adversarial false hit suite
 - [ ] OpenTelemetry spans and metrics endpoint
 
-Setup and run instructions will land here once the Compose stack is committed. Nothing runs yet, so there's nothing honest to put in that section.
-
 The plan runs twelve weeks from early September to a demo on 25 November, with checkpoints in mid September, mid October and mid November. The critical path is the semantic cache, which carries the most unknowns and gates two of the three demonstrations, so it's scheduled early enough to leave recovery time if it doesn't work first try.
+
+## Module tree
+
+Every file below exists and carries a comment describing what will live in it. None of them contain logic yet.
+
+```
+app/
+  __init__.py            package version
+  main.py                FastAPI app, lifespan wiring, router registration
+  config.py              environment driven settings, no constants elsewhere
+  models.py              request, response and internal schemas
+  api/
+    chat.py              POST /v1/chat/completions, cache flush, cache stats
+    health.py            GET /health, GET /metrics
+  cache/
+    keys.py              normalisation and SHA-256 key derivation
+    exact_cache.py       Tier 1, exact match in Redis
+    semantic_cache.py    Tier 2, vector similarity in ChromaDB
+    embedder.py          local sentence-transformers encoder
+  limiter/
+    bucket.py            token bucket, reserve, reconcile, release
+    scripts.lua          atomic refill and reserve
+  providers/
+    base.py              the provider interface
+    openai_client.py     primary provider
+    anthropic_client.py  failover target
+    breaker.py           circuit breaker state machine
+  telemetry/
+    tracing.py           OpenTelemetry spans, gen_ai conventions
+    metrics.py           counters behind /metrics
+benchmarks/
+  harness.py             workload replay across thresholds
+  workload.py            committed workload subset loader
+  report.py              report generation from the counters
+evaluation/
+  ragas_pipeline.py      quality parity scoring
+  adversarial.py         negation, entity swap and numeric change generators
+tests/
+  conftest.py            fakeredis, stub provider, test client
+  test_smoke.py          imports every module, keeps CI green from commit one
+  test_cache.py test_limiter.py test_breaker.py
+  test_api.py test_adversarial.py
+locustfile.py            load profile for the concurrency target
+docker-compose.yml       gateway, redis, chromadb
+Dockerfile               bakes the embedding model at build time
+```
+
+## Quickstart
+
+Copy the example environment and fill in your provider keys first. `.env` is git ignored and must never be committed.
+
+```
+cp .env.example .env
+docker compose up
+```
+
+The gateway is the only service with a published port. Redis and ChromaDB stay on the internal network. Once it's up:
+
+```
+curl http://localhost:8000/health
+```
+
+Note that nothing serves a real completion yet. The scaffold is files and comments, so `docker compose up` will not give you a working gateway until the modules are filled in.
+
+## Environment variables
+
+Every value is read from the environment. There are no constants in code, so a benchmark can sweep any of these without a code change.
+
+| Variable | Default | What it controls |
+| - | - | - |
+| `OPENAI_API_KEY` | none | Primary provider credential. Required. Never committed. |
+| `ANTHROPIC_API_KEY` | none | Failover provider credential. Required. Never committed. |
+| `SEMCACHE_REDIS_URL` | `redis://redis:6379/0` | Tier 1 cache and rate limiter buckets. |
+| `SEMCACHE_CHROMA_HOST` | `http://chromadb:8000` | Tier 2 vector index. |
+| `SEMCACHE_SIMILARITY_THRESHOLD` | `0.90` | Theta. A Tier 2 hit needs a score at or above this. |
+| `SEMCACHE_CACHE_TTL_SECONDS` | `3600` | Entry lifetime, applied at write time, never extended on a hit. |
+| `SEMCACHE_BUCKET_CAPACITY` | `100000` | Maximum tokens a caller may hold. |
+| `SEMCACHE_BUCKET_REFILL_RATE` | `1000` | Tokens restored per second. Also derives the retry hint on a 429. |
+| `SEMCACHE_PRIMARY_PROVIDER` | `openai` | Provider tried first. |
+| `SEMCACHE_SECONDARY_PROVIDER` | `anthropic` | Failover target. |
+| `SEMCACHE_BREAKER_FAILURE_THRESHOLD` | `5` | Failures in the window before the breaker opens. |
+| `SEMCACHE_BREAKER_WINDOW_SECONDS` | `60` | Window those failures are counted in. |
+| `SEMCACHE_BREAKER_BASE_BACKOFF` | `1.0` | Starting retry delay in seconds. |
+| `SEMCACHE_BREAKER_BACKOFF_CEILING` | `60.0` | Cap that exponential growth stops at. |
+| `SEMCACHE_EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Encoder baked into the image at build time. |
+| `SEMCACHE_LOG_PROMPTS` | `false` | Whether prompt text reaches the logs. Development only, since prompts are caller data. |
+
 
 ## Repository structure
 
-```
-README.md                      this file
-SemCache-Router_PRD3 (1).md    the full product requirements document
-```
-
-That's the whole repository right now. The module layout described in the PRD, with separate packages for the API, cache, limiter, providers, telemetry and evaluation, is planned rather than present.
+The module tree above is the layout, and it now matches the PRD's low level design file for file. Alongside it sit the PRD itself, this README, the Compose stack, the Dockerfile, the CI workflow and the example environment.
 
 This is an OJT self assign project at Polaris School of Technology on the Generative AI track. The full design, including the traceability matrix and the complete test list, is in the [PRD](<SemCache-Router_PRD3 (1).md>).
