@@ -1,0 +1,21 @@
+# Compose stack: gateway, redis, chromadb.
+#
+# Will define three services:
+#
+#   gateway   built from the Dockerfile, the only service with a published
+#             port, configured entirely by environment variables
+#   redis     Tier 1 cache and the rate limiter buckets, started with
+#             appendonly yes, mounting a named volume
+#   chromadb  Tier 2 vector index, mounting a named volume
+#
+# Both stateful services use named volumes because state must survive a
+# container restart. Without that, a benchmark run started right after a restart
+# begins cold and reports a hit ratio that says nothing about the cache and
+# everything about the restart.
+#
+# Redis runs with append only persistence rather than periodic snapshots, since
+# losing the last few seconds of writes to an untimely crash would quietly
+# change the numbers between runs.
+#
+# Only the gateway port is published. Redis and Chroma stay reachable on the
+# internal network only.
