@@ -1,0 +1,12 @@
+# Continuous integration.
+#
+# Will run on every push and pull request:
+#   lint          ruff over the whole tree
+#   type check    mypy over app, benchmarks and evaluation
+#   tests         pytest, which needs no services thanks to the fakes
+#   secret scan   so a provider key can never reach the history unnoticed
+#
+# Lint, tests and the secret scan gate every merge into main.
+#
+# The smoke test means this pipeline is green from the first commit, so a red
+# build always means a real regression rather than an unfinished scaffold.
