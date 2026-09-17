@@ -1,0 +1,21 @@
+-- Atomic refill and reserve for the token bucket.
+--
+-- Runs as one script so that read, refill, compare and write cannot be
+-- interleaved by a concurrent caller. The same sequence written in Python would
+-- leave a window in which two callers both read a sufficient balance and both
+-- proceed, which is the exact overspend a rate limiter exists to prevent.
+--
+-- KEYS[1]  bucket key, of the form rl:{api_key}:{window}
+-- ARGV[1]  capacity, the maximum balance
+-- ARGV[2]  refill_rate, tokens restored per second
+-- ARGV[3]  estimate, the tokens to reserve
+-- ARGV[4]  now, a unix timestamp
+--
+-- Returns:  admitted flag, tokens remaining, retry after seconds
+--
+-- Intended steps:
+--   1. read tokens remaining and last refill time, defaulting to a full bucket
+--   2. add elapsed seconds times refill rate, clamped at capacity
+--   3. if the balance covers the estimate, subtract it and admit
+--   4. otherwise refuse, with the wait derived from the refill rate
+--   5. write the balance and the refill time back in the same call
