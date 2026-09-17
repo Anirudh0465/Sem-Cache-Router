@@ -1,0 +1,17 @@
+# Runtime and development dependencies.
+#
+# Will pin, by group:
+#
+#   gateway      fastapi, uvicorn, pydantic, pydantic-settings
+#   state        redis, chromadb
+#   embedding    sentence-transformers
+#   tokenising   tiktoken
+#   providers    openai, anthropic
+#   telemetry    opentelemetry sdk and the OTLP exporter
+#   evaluation   ragas
+#   testing      pytest, pytest-asyncio, fakeredis, httpx
+#   load         locust
+#   tooling      ruff, mypy
+#
+# Versions are pinned rather than floated, because a benchmark result that
+# cannot be reproduced on the same dependency set is not a result.
