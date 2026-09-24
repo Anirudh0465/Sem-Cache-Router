@@ -1,17 +1,43 @@
 # Runtime and development dependencies.
 #
-# Will pin, by group:
-#
-#   gateway      fastapi, uvicorn, pydantic, pydantic-settings
-#   state        redis, chromadb
-#   embedding    sentence-transformers
-#   tokenising   tiktoken
-#   providers    openai, anthropic
-#   telemetry    opentelemetry sdk and the OTLP exporter
-#   evaluation   ragas
-#   testing      pytest, pytest-asyncio, fakeredis, httpx
-#   load         locust
-#   tooling      ruff, mypy
+# Direct dependencies only, grouped and commented so the intent is readable.
+# The transitively pinned set lives in requirements.lock.txt, which is what CI
+# installs. Pinning only direct dependencies does not make a run reproducible,
+# so the lockfile is the one that matters and this file is the one humans read.
 #
 # Versions are pinned rather than floated, because a benchmark result that
 # cannot be reproduced on the same dependency set is not a result.
+#
+# Regenerate the lock after editing this file:
+#   uv pip compile requirements.txt -o requirements.lock.txt
+#
+# Deliberately absent until the slice that needs them, so that nothing
+# speculative is installed:
+#   tiktoken                  the limiter is not built, and tiktoken downloads
+#                             BPE files from the network on first use, which
+#                             would make CI flaky
+#   openai, anthropic         no real provider adapters yet
+#   chromadb,                 Tier 2
+#   sentence-transformers
+#   opentelemetry-*           observability phase
+#   ragas                     evaluation phase
+#   locust                    load testing phase
+
+# gateway
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+pydantic==2.11.9
+pydantic-settings==2.11.0
+
+# state
+redis==6.4.0
+
+# testing
+pytest==8.4.2
+pytest-asyncio==1.2.0
+fakeredis==2.31.3
+httpx==0.28.1
+
+# tooling
+ruff==0.14.0
+mypy==1.18.2
