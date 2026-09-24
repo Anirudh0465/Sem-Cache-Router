@@ -1,0 +1,60 @@
+# Tool configuration for ruff, mypy and pytest.
+#
+# The project is not packaged and is not installed, so this file carries no
+# build system and no project metadata. It exists so that all three tools run
+# against settings we chose rather than against their defaults.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# tests/__init__.py exists, so the suite is a package. This makes `app`
+# importable from the repository root without installing the project, which
+# keeps the setup to one command.
+pythonpath = ["."]
+
+# "auto" rather than "strict". Under strict, an async test written without the
+# marker is silently skipped while still reporting as collected, which is the
+# worst failure mode available: a test that never runs and never complains.
+# Auto costs a decorator we would have written anyway.
+asyncio_mode = "auto"
+
+addopts = "-q --strict-markers"
+
+markers = [
+    "slow: tests that sleep for real time, deselect with -m 'not slow'",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+exclude = [".venv", "__pycache__"]
+
+[tool.ruff.lint]
+# A selection we intend to keep green, rather than everything ruff offers.
+#   E, F  pycodestyle errors and pyflakes, the baseline
+#   I     import sorting, so import order stops appearing in diffs
+#   UP    pyupgrade, so syntax tracks the pinned interpreter
+#   B     bugbear, which catches the mutable-default and loop-variable-capture
+#         classes of bug that type checking does not
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["app"]
+
+# Every function in app/ carries a signature. This is the rule the skeleton
+# comments already assert, enforced rather than trusted.
+disallow_untyped_defs = true
+
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+# Deliberately not --strict. Its disallow_any_generics and warn_return_any
+# fight third-party stubs, redis-py in particular, and the cost is a codebase
+# peppered with type: ignore, which is worse than no checking because it hides
+# the real problems among the noise.
+
+[[tool.mypy.overrides]]
+module = ["fakeredis.*"]
+ignore_missing_imports = true
