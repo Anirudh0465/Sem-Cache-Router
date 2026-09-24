@@ -67,7 +67,8 @@ async def _fail_400() -> None:
 
 async def _fail_timeout() -> None:
     """Raise an asyncio.TimeoutError, simulating a provider timeout."""
-    raise asyncio.TimeoutError("read timed out")
+    # asyncio.TimeoutError has been an alias of the builtin since 3.11.
+    raise TimeoutError("read timed out")
 
 
 # ---------------------------------------------------------------------------
