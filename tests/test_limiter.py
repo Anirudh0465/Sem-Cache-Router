@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import pytest
-import time
-from app.limiter.bucket import TokenBucket
 import redis.asyncio as redis_async
+
+from app.limiter.bucket import TokenBucket
+
 
 @pytest.mark.skip(reason="fakeredis does not support evalsha for lua scripts")
 @pytest.mark.asyncio
 async def test_reserve_and_refill(fake_redis: redis_async.Redis) -> None:
     bucket = TokenBucket(fake_redis, capacity=100, refill_rate=10)
-    
+
     # 1. Admit within capacity
     admitted, rem, retry = await bucket.reserve("key1", "w1", 60)
     assert admitted is True
