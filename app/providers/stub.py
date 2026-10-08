@@ -90,7 +90,7 @@ class StubProvider(LLMProvider):
         characters = sum(len(message.content) for message in messages)
         return max(1, characters // 4)
 
-    def price_of(self, usage: Usage) -> float:
+    def price_of(self, usage: Usage, model: str = "gpt-4o-mini") -> float:
         """Zero. The stub makes no network call, so it genuinely costs nothing.
 
         Not a placeholder value: a benchmark run against the stub should report
