@@ -1,22 +1,23 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+
 import redis.asyncio as redis_async
+
 
 class TokenBucket:
     def __init__(self, redis_client: redis_async.Redis, capacity: int, refill_rate: float) -> None:
         self.redis = redis_client
         self.capacity = capacity
         self.refill_rate = refill_rate
-        
-        with open("app/limiter/scripts.lua", "r") as f:
+
+        with open("app/limiter/scripts.lua") as f:
             script_content = f.read()
         self.script = self.redis.register_script(script_content)
 
     async def reserve(self, api_key: str, window: str, estimate: int) -> tuple[bool, int, int]:
         """Attempt to reserve an estimated token count.
-        
+
         Returns (admitted, tokens_remaining, retry_after_seconds).
         """
         key = f"rl:{api_key}:{window}"
@@ -30,12 +31,6 @@ class TokenBucket:
     async def release(self, api_key: str, window: str, tokens: int) -> None:
         """Return a reservation in full (e.g. on cache hit)."""
         key = f"rl:{api_key}:{window}"
-        now = int(time.time())
-        # We can just HINCRBY the tokens_remaining.
-        # But we must not exceed capacity. Lua script is better, but this works for now.
-        # A simple HINCRBY works, though it might overfill slightly if not careful.
-        # For a proper release, a small lua script or just a math.min is needed.
-        # Let's use a quick script.
         release_script = """
         local key = KEYS[1]
         local capacity = tonumber(ARGV[1])
@@ -46,7 +41,7 @@ class TokenBucket:
             redis.call("HSET", key, "tokens_remaining", new_val)
         end
         """
-        await self.redis.eval(release_script, 1, key, self.capacity, tokens)
+        await self.redis.eval(release_script, 1, key, str(self.capacity), str(tokens)) # type: ignore
 
     async def reconcile(self, api_key: str, window: str, estimate: int, actual: int) -> None:
         """Settle a reservation against reported usage."""
