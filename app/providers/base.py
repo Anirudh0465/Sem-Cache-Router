@@ -71,7 +71,7 @@ class LLMProvider(ABC):
         """
 
     @abstractmethod
-    def price_of(self, usage: Usage) -> float:
+    def price_of(self, usage: Usage, model: str = "gpt-4o-mini") -> float:
         """Convert reported usage to dollars using a committed price table.
 
         A table rather than a constant, so that a provider price change does not
