@@ -77,6 +77,30 @@ def test_reconnect_cooldown_must_be_positive() -> None:
         settings(chroma_reconnect_seconds=0)
 
 
+def test_the_limiter_is_off_by_default() -> None:
+    """Off by default, so nobody is throttled by a budget they never configured."""
+    assert settings().limiter_enabled is False
+
+
+def test_the_limiter_reserves_a_reply_allowance_by_default() -> None:
+    """Without one, a request that sets no max_tokens would be admitted for its prompt alone."""
+    assert settings().limiter_default_completion_tokens == 256
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_the_reply_allowance_must_be_positive(value: int) -> None:
+    """A zero allowance would admit an open ended reply at no cost."""
+    with pytest.raises(ValidationError):
+        settings(limiter_default_completion_tokens=value)
+
+
+@pytest.mark.parametrize("name", ["bucket_capacity", "bucket_refill_rate"])
+def test_a_bucket_must_have_room_and_refill(name: str) -> None:
+    """A bucket with no capacity or no refill rate would refuse every request, or refuse forever."""
+    with pytest.raises(ValidationError):
+        settings(**{name: 0})
+
+
 @pytest.mark.parametrize(
     ("given", "expected"),
     [

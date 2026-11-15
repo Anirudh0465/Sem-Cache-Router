@@ -46,9 +46,18 @@ class Settings(BaseSettings):
     similarity_threshold: float = Field(default=0.90, ge=0.0, le=1.0)
     cache_ttl_seconds: int = Field(default=3600, gt=0)
 
-    # Admission control.
+    # Admission control. Off by default, like Tier 2: with it off the gateway
+    # admits everything exactly as it did before the limiter existed, so no one
+    # running locally or in the test suite is throttled by a budget they never set.
+    limiter_enabled: bool = False
     bucket_capacity: int = Field(default=100_000, gt=0)
     bucket_refill_rate: float = Field(default=1000.0, gt=0)
+
+    # Provider tokens reserved for the reply when a request does not say how long
+    # it may be. The true reply length is unknown until after the call, so the
+    # estimate has to assume something, and assuming zero would admit a caller
+    # for far less than a long answer will cost.
+    limiter_default_completion_tokens: int = Field(default=256, gt=0)
 
     # Providers. The default is the stub rather than OpenAI so that the gateway
     # starts and serves with no credentials present, which is what makes the
