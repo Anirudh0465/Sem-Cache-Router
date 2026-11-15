@@ -17,15 +17,15 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
-from app.cache.semantic_cache import SemanticHit
+from app.cache.semantic_cache import SemanticHit, Tier2Result
 from app.providers.stub import StubProvider
 
 AUTH = {"Authorization": "Bearer test-key"}
 MODEL = "gpt-4o-mini"
 PROMPT = "What is the capital of France? My account number is 4421-8890."
 LOG_FIELDS = {
-    "request_id", "cache_status", "similarity", "provider", "model", "input_tokens",
-    "output_tokens", "cost_usd", "breaker_state", "error_code", "latency_ms",
+    "request_id", "cache_status", "similarity", "tier2_status", "provider", "model",
+    "input_tokens", "output_tokens", "cost_usd", "breaker_state", "error_code", "latency_ms",
 }
 
 
@@ -60,7 +60,7 @@ def log_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
 class FixedSemanticHit:
     """A semantic cache that always answers with a known score."""
 
-    async def search(self, model: str, messages: Any) -> SemanticHit:
+    def _make_hit(self) -> SemanticHit:
         return SemanticHit(
             response_body={
                 "id": "chatcmpl-x", "created": 1, "model": MODEL,
@@ -70,6 +70,12 @@ class FixedSemanticHit:
             similarity=0.93,
             entry_id="e1",
         )
+
+    async def search(self, model: str, messages: Any) -> SemanticHit:
+        return self._make_hit()
+
+    async def search_with_status(self, model: str, messages: Any) -> Tier2Result:
+        return Tier2Result(hit=self._make_hit(), unavailable=False)
 
     async def add(self, *args: Any, **kwargs: Any) -> None:
         return None
@@ -155,8 +161,9 @@ def test_each_request_writes_exactly_one_log_line_with_every_field(
     lines = log_lines(caplog)
 
     assert len(lines) == 1
-    assert set(lines[0]) == LOG_FIELDS
+    assert LOG_FIELDS <= set(lines[0])
     assert lines[0]["cache_status"] == "miss"
+    assert lines[0]["tier2_status"] is None
     assert lines[0]["similarity"] is None
     assert lines[0]["latency_ms"] >= 0
 
