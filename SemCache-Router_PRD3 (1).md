@@ -663,6 +663,7 @@ The two extra fields are additive. A strict OpenAI client ignores unknown keys, 
 | --- | --- | --- |
 | 400 | INVALID_REQUEST | Body failed schema validation |
 | 401 | MISSING_API_KEY | No caller key supplied |
+| 413 | REQUEST_TOO_LARGE | Body exceeds the configured limit, refused before it is parsed |
 | 429 | TOKEN_BUDGET_EXCEEDED | Bucket exhausted, carries a retry hint derived from the refill rate |
 | 502 | ALL_PROVIDERS_UNAVAILABLE | Every configured provider failed or has an open breaker |
 | 503 | DEPENDENCY_UNAVAILABLE | Redis unreachable, so admission cannot be decided and the gateway fails |
