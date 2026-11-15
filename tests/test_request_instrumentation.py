@@ -163,7 +163,8 @@ def test_each_request_writes_exactly_one_log_line_with_every_field(
     assert len(lines) == 1
     assert LOG_FIELDS <= set(lines[0])
     assert lines[0]["cache_status"] == "miss"
-    assert lines[0]["tier2_status"] is None
+    # The default test client has no semantic cache configured.
+    assert lines[0]["tier2_status"] == "disabled"
     assert lines[0]["similarity"] is None
     assert lines[0]["latency_ms"] >= 0
 
