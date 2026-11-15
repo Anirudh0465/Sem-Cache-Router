@@ -49,7 +49,7 @@ from app.models import (
 )
 from app.providers.base import ProviderError
 from app.telemetry.request_record import RequestOutcome, breaker_state_of, record_request
-from app.telemetry.tracing import request_span
+from app.telemetry.tracing import child_span, request_span
 
 router = APIRouter(tags=["chat"])
 
@@ -153,18 +153,19 @@ async def _serve(
             )
 
     # Step 4. Tier 1.
-    try:
-        cached = await state.cache.get(payload.model, payload.messages)
-    except Exception as exc:
-        # Fail closed. Admission is a no-op today, so a pass through would be
-        # possible, but the ordering contract is the invariant being protected:
-        # a gateway whose failure behaviour changes once the limiter ships is
-        # one nobody can reason about.
-        raise GatewayError(
-            ErrorCode.DEPENDENCY_UNAVAILABLE,
-            "Cache is unreachable, so admission cannot be decided.",
-            status_code=503,
-        ) from exc
+    with child_span("cache tier1 lookup", state):
+        try:
+            cached = await state.cache.get(payload.model, payload.messages)
+        except Exception as exc:
+            # Fail closed. Admission is a no-op today, so a pass through would be
+            # possible, but the ordering contract is the invariant being protected:
+            # a gateway whose failure behaviour changes once the limiter ships is
+            # one nobody can reason about.
+            raise GatewayError(
+                ErrorCode.DEPENDENCY_UNAVAILABLE,
+                "Cache is unreachable, so admission cannot be decided.",
+                status_code=503,
+            ) from exc
 
     if cached is not None:
         await _release_for_hit(limiter, reservation)
@@ -175,7 +176,8 @@ async def _serve(
 
     # Step 5. Tier 2, only after an exact miss, since embedding is the
     # expensive step and an exact repeat does not need it.
-    semantic = await _lookup_tier2(state, payload)
+    with child_span("cache tier2 lookup", state):
+        semantic = await _lookup_tier2(state, payload)
     if semantic is not None:
         await _release_for_hit(limiter, reservation)
         metrics.record_tier2_hit()
@@ -191,14 +193,15 @@ async def _serve(
 
     # Step 6. Provider call. The circuit breaker wraps this once failover is
     # wired, which is step 7; today a failure is terminal.
-    try:
-        provider_response = await state.provider.complete(payload)
-    except ProviderError as exc:
-        raise GatewayError(
-            ErrorCode.ALL_PROVIDERS_UNAVAILABLE,
-            f"Provider {exc.provider} failed and there is no configured failover.",
-            status_code=502,
-        ) from exc
+    with child_span(f"provider call {payload.model}", state):
+        try:
+            provider_response = await state.provider.complete(payload)
+        except ProviderError as exc:
+            raise GatewayError(
+                ErrorCode.ALL_PROVIDERS_UNAVAILABLE,
+                f"Provider {exc.provider} failed and there is no configured failover.",
+                status_code=502,
+            ) from exc
 
     # Step 8. Write through and reconcile.
     body = _to_body(provider_response, payload.model)

@@ -45,11 +45,24 @@ def exporter(client: TestClient) -> Iterator[InMemorySpanExporter]:
     provider.shutdown()
 
 
-def only_span(exporter: InMemorySpanExporter) -> ReadableSpan:
-    """The single span one request should produce."""
+def root_span(exporter: InMemorySpanExporter) -> ReadableSpan:
+    """The top-level span for a request — the one with no parent.
+
+    After PR5 a request produces multiple spans (the root plus child spans for
+    Tier 1, Tier 2 and the provider call). Tests that inspect request-level
+    attributes (cache_status, cost, model) must look at the root span, not any
+    of the children.
+    """
     spans = exporter.get_finished_spans()
-    assert len(spans) == 1, [span.name for span in spans]
-    return spans[0]
+    assert len(spans) >= 1, "expected at least one span"
+    roots = [s for s in spans if s.parent is None]
+    assert len(roots) == 1, [s.name for s in spans]
+    return roots[0]
+
+
+def only_span(exporter: InMemorySpanExporter) -> ReadableSpan:
+    """Alias kept for callers that do not care about child spans."""
+    return root_span(exporter)
 
 
 def log_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
@@ -78,12 +91,17 @@ class FixedSemanticHit:
 # --- spans ----------------------------------------------------------------
 
 
-def test_a_miss_produces_one_span_with_every_documented_attribute(
+def test_a_miss_produces_a_root_span_with_every_documented_attribute(
     client: TestClient, exporter: InMemorySpanExporter
 ) -> None:
-    """PRD section 18.3, on a single span, named by the gen_ai convention."""
+    """PRD section 18.3: root span named by gen_ai convention carries all attributes.
+
+    A miss also produces child spans for the Tier 1 lookup, Tier 2 lookup,
+    and provider call. Those are verified in test_trace_detail.py; this test
+    checks only the root span's attribute set.
+    """
     client.post("/v1/chat/completions", json=body(), headers=AUTH)
-    span = only_span(exporter)
+    span = root_span(exporter)
     attrs = span.attributes or {}
 
     assert span.name == f"chat {MODEL}"
