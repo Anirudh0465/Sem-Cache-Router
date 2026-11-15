@@ -104,6 +104,12 @@ class Settings(BaseSettings):
     # accepted rather than validated against a key store that does not exist.
     require_api_key: bool = True
 
+    # The largest request body accepted, in bytes. A chat request is a short JSON
+    # document, so 1 MiB is far above any real one while still bounding what a
+    # single caller can make the gateway read, embed and forward to a provider
+    # that bills by the token.
+    max_request_bytes: int = Field(default=1_048_576, gt=0)
+
     # Provider credentials. Read unprefixed, because that is the name the
     # provider SDKs and every deployment guide already use. Optional because
     # the stub needs neither, and absent means the corresponding adapter
