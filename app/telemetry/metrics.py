@@ -34,6 +34,8 @@ class Metrics:
         self.throttled_requests = 0
         self.breaker_failovers = 0
         self.total_provider_spend_usd = 0.0
+        self.routed_cheap = 0
+        self.routed_unchanged = 0
         self._hit_latencies: list[float] = []
         self._miss_latencies: list[float] = []
 
@@ -61,6 +63,16 @@ class Metrics:
         """Count a request rerouted by the circuit breaker."""
         with self._lock:
             self.breaker_failovers += 1
+
+    def record_routed_cheap(self) -> None:
+        """Count a request routed to the cheaper model."""
+        with self._lock:
+            self.routed_cheap += 1
+
+    def record_routed_unchanged(self) -> None:
+        """Count a request whose model routing left unchanged."""
+        with self._lock:
+            self.routed_unchanged += 1
 
     def add_spend(self, amount: float) -> None:
         """Accumulate provider cost in USD."""
@@ -96,6 +108,8 @@ class Metrics:
                 "throttled_requests": self.throttled_requests,
                 "breaker_failovers": self.breaker_failovers,
                 "total_provider_spend_usd": self.total_provider_spend_usd,
+                "routed_cheap": self.routed_cheap,
+                "routed_unchanged": self.routed_unchanged,
                 "latency_hit_p50_ms": self._percentile(self._hit_latencies, 0.50),
                 "latency_hit_p95_ms": self._percentile(self._hit_latencies, 0.95),
                 "latency_miss_p50_ms": self._percentile(self._miss_latencies, 0.50),
