@@ -13,7 +13,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ProviderName = Literal["stub", "openai", "anthropic"]
@@ -55,7 +55,20 @@ class Settings(BaseSettings):
     # test suite and a local demo runnable offline. A real deployment sets
     # SEMCACHE_PRIMARY_PROVIDER=openai in its environment.
     primary_provider: ProviderName = "stub"
-    secondary_provider: ProviderName = "anthropic"
+
+    # The provider to fail over to when the primary is unhealthy, or None for no
+    # failover. Opt in rather than defaulting to a real vendor: with the default
+    # primary being the stub, a default secondary of anthropic would demand a key
+    # nobody configured, and an unconfigured failover that fails silently is worse
+    # than none that says so. Setting it to the primary is rejected, because a
+    # provider cannot fail over to itself.
+    secondary_provider: ProviderName | None = None
+
+    # The model the secondary is called with. The caller asks for a model by name,
+    # and one vendor's name means nothing to another: sending gpt-4o-mini to
+    # Anthropic is a 404, which would turn a failover into an error. None means
+    # the secondary's own default model.
+    secondary_model: str | None = None
 
     # Circuit breaker.
     breaker_failure_threshold: int = Field(default=5, gt=0)
@@ -117,6 +130,19 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ANTHROPIC_API_KEY", "SEMCACHE_ANTHROPIC_API_KEY"),
     )
 
+    # Where the adapters send requests. Settings rather than constants so a
+    # deployment can go through a proxy or a compatible endpoint, and so a test or
+    # a demo can point the real adapters at a local stand in without a single
+    # patched module global.
+    openai_base_url: str = "https://api.openai.com/v1"
+    anthropic_base_url: str = "https://api.anthropic.com/v1"
+
+    # How long one provider call may take before it counts as a failure, which is
+    # what lets a hung provider trip the breaker and fail over instead of holding
+    # the request. Generous, because a long completion legitimately takes tens of
+    # seconds; a limit tuned to the median would fail the requests that cost most.
+    provider_timeout_seconds: float = Field(default=30.0, gt=0)
+
 
     @field_validator("chroma_host")
     @classmethod
@@ -153,6 +179,27 @@ class Settings(BaseSettings):
         if parsed.path in ("", "/"):
             return value.rstrip("/") + "/v1/traces"
         return value
+
+    @field_validator("openai_base_url", "anthropic_base_url")
+    @classmethod
+    def _provider_url_is_http(cls, value: str) -> str:
+        """Require an http or https URL, without a trailing slash.
+
+        The adapters append a path to it, so a trailing slash would produce a
+        double slash that some endpoints reject. Checked here so a typo fails at
+        startup, not on the first request that needs a provider.
+        """
+        parsed = urlsplit(value)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError("a provider base URL must be an http or https URL")
+        return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def _secondary_differs_from_primary(self) -> Settings:
+        """Refuse a failover target that is the provider it would fail over from."""
+        if self.secondary_provider is not None and self.secondary_provider == self.primary_provider:
+            raise ValueError("secondary_provider must differ from primary_provider")
+        return self
 
     @property
     def chroma_endpoint(self) -> tuple[str, int, bool]:
