@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.telemetry.metrics import Metrics
@@ -104,11 +105,123 @@ def test_percentile_with_no_samples_is_none() -> None:
 
 
 def test_instances_do_not_share_state() -> None:
-    """Two Metrics instances are independent — the singleton is gone."""
+    """Two Metrics instances are independent -- the singleton is gone."""
     a = Metrics()
     b = Metrics()
     a.record_tier1_hit()
     assert b.snapshot()["tier1_hits"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Bounded deque behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_window_evicts_oldest_samples() -> None:
+    """After 3N records with window=N only the N most recent samples remain."""
+    n = 5
+    m = Metrics(latency_window=n)
+    # First batch: values 0.001, 0.002, ..., 0.005 (old)
+    for i in range(1, n + 1):
+        m.record_latency(i * 0.001, hit=True)
+    # Second batch: values 0.100, 0.200, ..., 0.500 (also old, but newer than first)
+    for i in range(1, n + 1):
+        m.record_latency(i * 0.100, hit=True)
+    # Third batch: values 1.0, 2.0, ..., 5.0 (the most recent N, should be kept)
+    for i in range(1, n + 1):
+        m.record_latency(i * 1.0, hit=True)
+
+    snap = m.snapshot()
+    # Only the N most recent samples are kept.
+    assert snap["hit_sample_count"] == n
+    # The oldest batches are gone; the minimum kept sample is 1.0 s = 1000 ms.
+    assert snap["latency_hit_p50_ms"] is not None
+    assert snap["latency_hit_p50_ms"] >= 1000.0
+
+
+def test_window_size_in_snapshot() -> None:
+    """latency_window in the snapshot equals the value passed to the constructor."""
+    m = Metrics(latency_window=42)
+    assert m.snapshot()["latency_window"] == 42
+
+
+def test_sample_counts_reflect_deque_length() -> None:
+    """hit_sample_count and miss_sample_count track the deque size, not total records."""
+    n = 3
+    m = Metrics(latency_window=n)
+    for _ in range(10):
+        m.record_latency(0.001, hit=True)
+        m.record_latency(0.001, hit=False)
+    snap = m.snapshot()
+    assert snap["hit_sample_count"] == n
+    assert snap["miss_sample_count"] == n
+
+
+def test_percentiles_correct_on_known_window() -> None:
+    """Percentile calculation is still exact over the retained samples."""
+    m = Metrics(latency_window=100)
+    # Record 0.001 through 0.100 seconds (100 samples); p50 should be near 0.050 s.
+    for i in range(1, 101):
+        m.record_latency(i * 0.001, hit=False)
+    snap = m.snapshot()
+    # p50 of [1, 2, ..., 100] ms by linear interpolation: idx=49.5, so
+    # between s[49]=50 ms and s[50]=51 ms, frac=0.5 -> 50.5 ms.
+    assert snap["latency_miss_p50_ms"] == pytest.approx(50.5, abs=0.1)
+    # p95: idx = 99*0.95 = 94.05, s[94]=95 ms, s[95]=96 ms, frac=0.05 -> 95.05 ms.
+    assert snap["latency_miss_p95_ms"] == pytest.approx(95.05, abs=0.1)
+
+
+# ---------------------------------------------------------------------------
+# Ratio fields
+# ---------------------------------------------------------------------------
+
+
+def test_hit_ratio_is_none_with_no_traffic() -> None:
+    """hit_ratio is null before any requests, never 0, to avoid a false zero rate."""
+    m = Metrics()
+    snap = m.snapshot()
+    assert snap["hit_ratio"] is None
+    assert snap["tier1_hit_ratio"] is None
+    assert snap["tier2_hit_ratio"] is None
+
+
+def test_hit_ratio_is_zero_with_all_misses() -> None:
+    """When every request misses, hit_ratio is 0.0 (a real zero, not null)."""
+    m = Metrics()
+    m.record_miss()
+    m.record_miss()
+    snap = m.snapshot()
+    assert snap["hit_ratio"] == 0.0
+    assert snap["tier1_hit_ratio"] == 0.0
+    assert snap["tier2_hit_ratio"] == 0.0
+
+
+def test_hit_ratio_correct_with_mixed_traffic() -> None:
+    """hit_ratio and per-tier ratios are consistent with the raw counters."""
+    m = Metrics()
+    m.record_tier1_hit()
+    m.record_tier1_hit()
+    m.record_tier2_hit()
+    m.record_miss()
+    # 3 hits, 1 miss, 4 total.
+    snap = m.snapshot()
+    assert snap["requests_total"] == 4
+    assert snap["hit_ratio"] == pytest.approx(3 / 4)
+    assert snap["tier1_hit_ratio"] == pytest.approx(2 / 4)
+    assert snap["tier2_hit_ratio"] == pytest.approx(1 / 4)
+    # Ratios and total hits agree with raw counters.
+    assert snap["tier1_hits"] + snap["tier2_hits"] + snap["misses"] == snap["requests_total"]
+
+
+def test_requests_total_is_sum_of_all_outcomes() -> None:
+    """requests_total equals tier1_hits + tier2_hits + misses."""
+    m = Metrics()
+    m.record_tier1_hit()
+    m.record_tier2_hit()
+    m.record_tier2_hit()
+    m.record_miss()
+    snap = m.snapshot()
+    assert snap["requests_total"] == 4
 
 
 # ---------------------------------------------------------------------------
