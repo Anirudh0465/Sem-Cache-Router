@@ -124,6 +124,8 @@ kubernetes==37.0.1
     # via chromadb
 librt==0.16.0
     # via mypy
+lupa==2.8
+    # via fakeredis
 markdown-it-py==4.2.0
     # via rich
 mdurl==0.1.2
