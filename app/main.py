@@ -91,6 +91,7 @@ async def build_semantic_cache(settings: Settings) -> SemanticCache:
         ttl_seconds=settings.cache_ttl_seconds,
         threshold=settings.similarity_threshold,
         reconnect_seconds=settings.chroma_reconnect_seconds,
+        timeout_seconds=settings.chroma_timeout_seconds,
     )
 
 
