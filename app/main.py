@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 
 from app.api import chat, health
 from app.cache.embedder import OnnxEmbedder
+from app.cache.eviction import start_eviction, stop_eviction
 from app.cache.exact_cache import ExactCache
 from app.cache.semantic_cache import SemanticCache
 from app.config import Settings, get_settings
@@ -137,9 +138,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Tier 2. None when switched off, and the route guards on it, the same
     # pattern as the limiter, so the position of the lookup in the pipeline is
     # fixed whether or not a vector store is configured.
+    #
+    # The housekeeping task is started only for a cache built here, the same rule
+    # as every connection: a cache a test supplied is not ours to run jobs on.
+    eviction_task: asyncio.Task[None] | None = None
     if getattr(app.state, "semantic_cache", None) is None:
         app.state.semantic_cache = (
             await build_semantic_cache(settings) if settings.semantic_cache_enabled else None
+        )
+        eviction_task = start_eviction(
+            app.state.semantic_cache,
+            interval_seconds=settings.eviction_interval_seconds,
+            on_evicted=app.state.metrics.record_evicted,
         )
 
     # Tracing. install_tracing returns None when tracing is disabled, which
@@ -156,6 +166,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await stop_eviction(eviction_task)
         if owns_tracing and app.state.tracer_provider is not None:
             app.state.tracer_provider.shutdown()
         if owns_redis:

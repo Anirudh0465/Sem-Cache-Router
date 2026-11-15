@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     # for anyone running it locally on the stub provider. Compose turns it on.
     semantic_cache_enabled: bool = False
 
+    # How often expired Tier 2 entries are deleted, in seconds, or 0 to never.
+    # Expired entries are never served either way, because every query filters
+    # them out; this only reclaims the space, so a long interval costs storage
+    # and nothing else.
+    eviction_interval_seconds: float = Field(default=300.0, ge=0)
+
     # The collection carries a schema version for the same reason Tier 1 keys
     # do: if the stored shape changes, a new name orphans the old entries rather
     # than requiring a migration. Chroma rejects names outside this pattern, so
