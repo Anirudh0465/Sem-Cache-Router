@@ -59,7 +59,12 @@ opentelemetry-exporter-otlp-proto-http==1.34.1
 pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==7.0.0
-fakeredis==2.38.0
+# The lua extra brings lupa, which lets the fake Redis run the rate limiter's
+# Lua scripts. Without it both limiter tests had to be skipped, and the one
+# property the limiter exists for, that concurrent callers cannot overspend a
+# bucket, could not be tested at all. lupa ships an abi3 wheel, so it installs
+# on 3.14 with no compiler.
+fakeredis[lua]==2.38.0
 httpx==0.28.1
 
 # tooling
