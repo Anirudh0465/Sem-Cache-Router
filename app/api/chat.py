@@ -48,6 +48,7 @@ from app.models import (
     Usage,
 )
 from app.providers.base import ProviderError
+from app.providers.breaker import CircuitBreakerOpen
 from app.telemetry.request_record import RequestOutcome, breaker_state_of, record_request
 from app.telemetry.tracing import request_span
 
@@ -189,10 +190,11 @@ async def _serve(
             similarity=semantic.similarity,
         )
 
-    # Step 6. Provider call. The circuit breaker wraps this once failover is
-    # wired, which is step 7; today a failure is terminal.
+    # Steps 6 and 7. Call the primary provider through the circuit breaker; if
+    # the breaker is open, fail over to the secondary. Both steps are in
+    # _call_provider so this function stays below the complexity ceiling.
     try:
-        provider_response = await state.provider.complete(payload)
+        provider_response = await _call_provider(state, payload, metrics)
     except ProviderError as exc:
         raise GatewayError(
             ErrorCode.ALL_PROVIDERS_UNAVAILABLE,
@@ -232,6 +234,38 @@ async def _serve(
     outcome.output_tokens = provider_response.usage.completion_tokens
     outcome.cost_usd = provider_response.cost_usd
     return _from_cached(body, payload.model, CacheStatus.MISS)
+
+
+async def _call_provider(
+    state: Any,
+    payload: ChatCompletionRequest,
+    metrics: Any,
+) -> ProviderResponse:
+    """Call the primary provider through the circuit breaker, failing over to secondary.
+
+    When the breaker is OPEN it raises CircuitBreakerOpen immediately, without
+    touching the network. The secondary provider, if wired, then receives the
+    request and a failover is recorded in metrics. If there is no secondary, the
+    exception is re-raised as a ProviderError so the caller can map it to 502.
+
+    When no breaker is wired (breaker is None on state), the primary is called
+    directly, which is the pre-wiring behaviour preserved for compatibility.
+    """
+    breaker = getattr(state, "breaker", None)
+    if breaker is None:
+        return await state.provider.complete(payload)
+
+    try:
+        return await breaker.call(state.provider.complete, payload)
+    except CircuitBreakerOpen:
+        secondary = getattr(state, "secondary_provider", None)
+        if secondary is None:
+            raise ProviderError(
+                "Primary circuit breaker is open and no secondary provider is configured.",
+                provider=state.provider.name,
+            ) from None
+        metrics.record_failover()
+        return await secondary.complete(payload)
 
 
 async def _release_for_hit(limiter: Any, reservation: Any) -> None:
