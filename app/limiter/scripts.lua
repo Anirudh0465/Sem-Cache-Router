@@ -1,48 +1,71 @@
 -- Atomic refill and reserve for the token bucket.
 --
+-- Refilling and spending are one script because Redis runs a script without
+-- interleaving anything else. Two callers arriving together therefore cannot both
+-- read the same balance and both be admitted for tokens only one of them can have,
+-- which is the whole property the limiter exists to provide.
+--
 -- KEYS[1]  bucket key, of the form rl:{api_key}:{window}
--- ARGV[1]  capacity, the maximum balance
+-- ARGV[1]  capacity, the most a bucket can hold
 -- ARGV[2]  refill_rate, tokens restored per second
 -- ARGV[3]  estimate, the tokens to reserve
--- ARGV[4]  now, a unix timestamp
+-- ARGV[4]  now, optional: the time to use, in seconds
 --
--- Returns:  admitted flag, tokens remaining, retry after seconds
+-- Returns three numbers:
+--   status     1 admitted, 0 denied for now, 2 never admissible
+--   remaining  whole tokens left in the bucket, rounded down
+--   retry      whole seconds until the request could be admitted, 0 unless denied
+--
+-- Time comes from Redis, not from the caller. With several gateways in front of
+-- one Redis, a clock passed in by each would let a gateway whose clock runs ahead
+-- hand its callers refill that no other gateway agrees they have earned. ARGV[4]
+-- exists so a test can set the clock, and production never passes it.
+--
+-- A request larger than the whole bucket is status 2 rather than a denial. No
+-- amount of waiting makes it fit, and a retry hint on it would send the caller
+-- back every few seconds for ever.
 
 local key = KEYS[1]
 local capacity = tonumber(ARGV[1])
 local refill_rate = tonumber(ARGV[2])
 local estimate = tonumber(ARGV[3])
+
 local now = tonumber(ARGV[4])
+if now == nil then
+    local time = redis.call("TIME")
+    now = tonumber(time[1]) + tonumber(time[2]) / 1000000
+end
+
+if estimate > capacity then
+    return {2, 0, 0}
+end
 
 local bucket = redis.call("HMGET", key, "tokens_remaining", "last_refill_at")
-local tokens_remaining = tonumber(bucket[1])
+local tokens = tonumber(bucket[1])
 local last_refill_at = tonumber(bucket[2])
 
-if tokens_remaining == nil then
-    tokens_remaining = capacity
+-- A bucket that does not exist, or has expired, is full: that is what expiry means.
+if tokens == nil or last_refill_at == nil then
+    tokens = capacity
     last_refill_at = now
 end
 
-local elapsed = now - last_refill_at
-if elapsed > 0 then
-    local new_tokens = elapsed * refill_rate
-    tokens_remaining = math.min(capacity, tokens_remaining + new_tokens)
-    last_refill_at = now
-end
+local elapsed = math.max(0, now - last_refill_at)
+tokens = math.min(capacity, tokens + elapsed * refill_rate)
 
-if tokens_remaining >= estimate then
-    tokens_remaining = tokens_remaining - estimate
-    redis.call("HMSET", key, "tokens_remaining", tokens_remaining, "last_refill_at", last_refill_at)
-    -- Expire after window? The python code handles window in key name, but we can set TTL here.
-    -- If refill rate is e.g. 1 per second, and capacity is 100, full refill is 100s.
-    local ttl = math.ceil(capacity / refill_rate)
-    redis.call("EXPIRE", key, ttl)
-    return {1, tokens_remaining, 0}
+local status = 0
+local retry = 0
+if tokens >= estimate then
+    tokens = tokens - estimate
+    status = 1
 else
-    local needed = estimate - tokens_remaining
-    local retry_after = math.ceil(needed / refill_rate)
-    redis.call("HMSET", key, "tokens_remaining", tokens_remaining, "last_refill_at", last_refill_at)
-    local ttl = math.ceil(capacity / refill_rate)
-    redis.call("EXPIRE", key, ttl)
-    return {0, tokens_remaining, retry_after}
+    retry = math.ceil((estimate - tokens) / refill_rate)
 end
+
+-- State is written on a denial too, so the refill just counted is not counted again
+-- by the next caller. Expiry at the time a drained bucket takes to refill is
+-- equivalent to never expiring: by then it is full, and a missing bucket is full.
+redis.call("HSET", key, "tokens_remaining", tokens, "last_refill_at", now)
+redis.call("EXPIRE", key, math.max(1, math.ceil(capacity / refill_rate)))
+
+return {status, math.floor(tokens), retry}
