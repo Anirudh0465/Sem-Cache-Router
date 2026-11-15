@@ -22,6 +22,8 @@ from fastapi.testclient import TestClient
 from app.cache.exact_cache import ExactCache
 from app.config import Settings, get_settings
 from app.main import create_app
+from app.providers.breaker import CircuitBreaker
+from app.providers.router import FailoverRouter, ProviderSlot
 from app.providers.stub import StubProvider
 
 MODEL_TESTS_ENV = "SEMCACHE_RUN_MODEL_TESTS"
@@ -53,11 +55,29 @@ def settings() -> Settings:
     a test pass on one machine and fail on another. Short TTL so expiry can be
     exercised without a long sleep.
     """
+    # _env_file is accepted at runtime by pydantic-settings but is not part of the
+    # generated signature, so the type checker cannot see it. Without it the
+    # docstring above would be a promise nothing keeps: the local .env is read
+    # regardless of the arguments passed.
     return Settings(
+        _env_file=None,  # type: ignore[call-arg]
         redis_url="redis://localhost:6379/0",
         cache_ttl_seconds=2,
         primary_provider="stub",
     )
+
+
+@pytest.fixture(autouse=True)
+def _ignore_the_local_env_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the suite read no .env, so it behaves the same on every machine.
+
+    scripts/setup.sh copies .env.example to .env, and developers edit it. Anything
+    in it that changes behaviour, a secondary provider that needs a key, say, would
+    otherwise make tests pass on CI and fail locally, or the reverse. Settings that
+    a test builds itself pass _env_file=None; this covers the ones the app builds
+    for itself through get_settings().
+    """
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +109,15 @@ async def fake_redis() -> AsyncIterator[aioredis.FakeRedis]:
         yield client
     finally:
         await client.aclose()
+
+
+def router_around(provider: Any) -> FailoverRouter:
+    """A router with one provider behind a default breaker, for a test that swaps providers.
+
+    The route answers through app.state.router, so replacing app.state.provider
+    after startup no longer changes what answers; swapping the router does.
+    """
+    return FailoverRouter([ProviderSlot(provider, CircuitBreaker())])
 
 
 @pytest.fixture
