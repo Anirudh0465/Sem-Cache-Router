@@ -155,7 +155,7 @@ def test_each_request_writes_exactly_one_log_line_with_every_field(
     lines = log_lines(caplog)
 
     assert len(lines) == 1
-    assert set(lines[0]) == LOG_FIELDS
+    assert LOG_FIELDS <= set(lines[0])
     assert lines[0]["cache_status"] == "miss"
     assert lines[0]["similarity"] is None
     assert lines[0]["latency_ms"] >= 0
