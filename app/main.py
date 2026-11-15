@@ -26,10 +26,11 @@ from app.cache.embedder import OnnxEmbedder
 from app.cache.exact_cache import ExactCache
 from app.cache.semantic_cache import SemanticCache
 from app.config import Settings, get_settings
-from app.errors import GatewayError, request_id
-from app.models import ErrorCode, ErrorDetail, ErrorResponse
+from app.errors import GatewayError, error_response, request_id
+from app.models import ErrorCode
 from app.providers.base import LLMProvider
 from app.providers.stub import StubProvider
+from app.request_limits import BodySizeLimit
 from app.telemetry.metrics import Metrics
 from app.telemetry.tracing import install_tracing
 
@@ -174,28 +175,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(chat.router)
-
-    def envelope(
-        status_code: int,
-        code: ErrorCode,
-        message: str,
-        request_id: str,
-        retry_after_seconds: int | None = None,
-    ) -> JSONResponse:
-        """Render the one error shape the API is documented to return."""
-        body = ErrorResponse(
-            error=ErrorDetail(
-                code=code,
-                message=message,
-                retry_after_seconds=retry_after_seconds,
-                request_id=request_id,
-            )
-        )
-        return JSONResponse(
-            status_code=status_code,
-            content=body.model_dump(mode="json"),
-            headers={"x-request-id": request_id},
-        )
+    app.add_middleware(BodySizeLimit)
 
     @app.exception_handler(RequestValidationError)
     async def on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -205,7 +185,7 @@ def create_app() -> FastAPI:
         returns 422 out of the box, so without this handler the API would
         quietly disagree with its own documentation.
         """
-        return envelope(
+        return error_response(
             400,
             ErrorCode.INVALID_REQUEST,
             "Request body failed schema validation.",
@@ -215,7 +195,7 @@ def create_app() -> FastAPI:
     @app.exception_handler(GatewayError)
     async def on_gateway_error(request: Request, exc: GatewayError) -> JSONResponse:
         """Render any error the routes raise deliberately."""
-        return envelope(
+        return error_response(
             exc.status_code,
             exc.code,
             exc.message,
