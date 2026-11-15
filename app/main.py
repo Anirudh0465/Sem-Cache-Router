@@ -29,6 +29,7 @@ from app.config import Settings, get_settings
 from app.errors import GatewayError, request_id
 from app.models import ErrorCode, ErrorDetail, ErrorResponse
 from app.providers.base import LLMProvider
+from app.providers.breaker import CircuitBreaker
 from app.providers.stub import StubProvider
 from app.telemetry.metrics import Metrics
 from app.telemetry.tracing import install_tracing
@@ -131,6 +132,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     if getattr(app.state, "metrics", None) is None:
         app.state.metrics = Metrics()
+
+    # Circuit breaker. Wraps the primary provider so repeated failures open it
+    # and traffic flows to the secondary. None on app.state disables the breaker
+    # entirely; a seeded value from a test is left in place, the same seam used
+    # for every other dependency.
+    if getattr(app.state, "breaker", None) is None:
+        app.state.breaker = CircuitBreaker(
+            failure_threshold=settings.breaker_failure_threshold,
+            window_seconds=settings.breaker_window_seconds,
+            base_backoff=settings.breaker_base_backoff,
+            backoff_ceiling=settings.breaker_backoff_ceiling,
+        )
+
+    # Secondary provider. Used when the primary's circuit breaker is open.
+    # build_provider raises for unimplemented names, so a secondary that is not
+    # yet supported degrades to None rather than stopping startup.
+    if getattr(app.state, "secondary_provider", None) is None:
+        try:
+            app.state.secondary_provider = build_provider(
+                settings.secondary_provider, settings
+            )
+        except ValueError:
+            app.state.secondary_provider = None
 
     # Tier 2. None when switched off, and the route guards on it, the same
     # pattern as the limiter, so the position of the lookup in the pipeline is

@@ -93,7 +93,7 @@ def test_a_miss_produces_one_span_with_every_documented_attribute(
     assert attrs["gen_ai.usage.output_tokens"] > 0
     assert attrs["semcache.cache_status"] == "miss"
     assert attrs["semcache.cost_usd"] == 0.0
-    assert attrs["semcache.breaker_state"] == "not_configured"
+    assert attrs["semcache.breaker_state"] == "closed"
     assert "semcache.similarity_score" not in attrs
     assert span.status.status_code == StatusCode.UNSET
 
