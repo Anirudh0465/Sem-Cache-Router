@@ -48,6 +48,7 @@ from app.models import (
     Usage,
 )
 from app.providers.base import ProviderError
+from app.router import choose_model
 from app.telemetry.request_record import RequestOutcome, breaker_state_of, record_request
 from app.telemetry.tracing import request_span
 
@@ -189,10 +190,19 @@ async def _serve(
             similarity=semantic.similarity,
         )
 
-    # Step 6. Provider call. The circuit breaker wraps this once failover is
-    # wired, which is step 7; today a failure is terminal.
+    # Step 6. Model routing then provider call. The routing result controls which
+    # model the provider receives; the cache key still uses the requested model.
+    routing = choose_model(payload.model, payload.messages, state.settings)
+    outcome.routed_model = routing.model
+    outcome.routing_reason = routing.reason
+    if routing.reason == "routed_cheap":
+        metrics.record_routed_cheap()
+    else:
+        metrics.record_routed_unchanged()
+
+    routed_payload = payload.model_copy(update={"model": routing.model})
     try:
-        provider_response = await state.provider.complete(payload)
+        provider_response = await state.provider.complete(routed_payload)
     except ProviderError as exc:
         raise GatewayError(
             ErrorCode.ALL_PROVIDERS_UNAVAILABLE,
