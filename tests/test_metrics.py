@@ -161,16 +161,21 @@ def test_spend_recorded_on_miss(client: TestClient) -> None:
 
 
 def test_metrics_endpoint_returns_all_fields(client: TestClient) -> None:
-    """GET /metrics returns every documented field."""
+    """GET /metrics returns every documented field.
+
+    Checked as a subset so that new fields added in future PRs do not silently
+    break this assertion while still guaranteeing every field the benchmark
+    report reads is present.
+    """
     metrics = client.get("/metrics").json()
-    expected = {
+    required = {
         "tier1_hits", "tier2_hits", "misses",
         "throttled_requests", "breaker_failovers",
         "total_provider_spend_usd",
         "latency_hit_p50_ms", "latency_hit_p95_ms",
         "latency_miss_p50_ms", "latency_miss_p95_ms",
     }
-    assert expected == set(metrics.keys())
+    assert required <= set(metrics.keys())
 
 
 def test_throttled_request_wires_counter() -> None:
