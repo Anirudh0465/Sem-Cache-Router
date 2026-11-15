@@ -127,3 +127,66 @@ def test_an_unusable_otel_endpoint_is_rejected_at_startup(url: str) -> None:
     """A typo should fail when the process starts, not as spans that never arrive."""
     with pytest.raises(ValidationError):
         settings(otel_exporter_endpoint=url)
+
+
+# --- providers -------------------------------------------------------------------------------
+
+
+def test_failover_is_opt_in() -> None:
+    """No secondary by default, so the default stub primary demands no vendor's key."""
+    assert settings().secondary_provider is None
+    assert settings().secondary_model is None
+
+
+def test_a_secondary_provider_can_be_chosen() -> None:
+    chosen = settings(primary_provider="openai", secondary_provider="anthropic")
+    assert chosen.secondary_provider == "anthropic"
+
+
+def test_a_provider_cannot_fail_over_to_itself() -> None:
+    with pytest.raises(ValidationError, match="must differ"):
+        settings(primary_provider="openai", secondary_provider="openai")
+
+
+def test_the_adapters_default_to_the_vendors_endpoints() -> None:
+    assert settings().openai_base_url == "https://api.openai.com/v1"
+    assert settings().anthropic_base_url == "https://api.anthropic.com/v1"
+
+
+@pytest.mark.parametrize("name", ["openai_base_url", "anthropic_base_url"])
+def test_a_trailing_slash_on_a_provider_url_is_dropped(name: str) -> None:
+    """The adapters append a path, and a double slash is rejected by some endpoints."""
+    assert getattr(settings(**{name: "http://proxy.internal:9000/v1/"}), name) == (
+        "http://proxy.internal:9000/v1"
+    )
+
+
+@pytest.mark.parametrize("name", ["openai_base_url", "anthropic_base_url"])
+@pytest.mark.parametrize("url", ["api.openai.com/v1", "ftp://proxy/v1", "not a url", "http://"])
+def test_an_unusable_provider_url_is_rejected_at_startup(name: str, url: str) -> None:
+    with pytest.raises(ValidationError):
+        settings(**{name: url})
+
+
+def test_the_provider_timeout_is_generous_by_default() -> None:
+    """A long completion legitimately takes tens of seconds."""
+    assert settings().provider_timeout_seconds == 30.0
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_a_provider_timeout_that_allows_no_time_is_rejected(value: float) -> None:
+    with pytest.raises(ValidationError):
+        settings(provider_timeout_seconds=value)
+
+
+def test_the_example_environment_loads_and_asks_for_nothing_extra() -> None:
+    """scripts/setup.sh copies .env.example into every fresh checkout.
+
+    If it ever set a secondary provider, every new checkout would refuse to start
+    for want of that vendor's key. Loading it here keeps that from happening
+    unnoticed.
+    """
+    loaded = Settings(_env_file=".env.example")  # type: ignore[call-arg]
+
+    assert loaded.secondary_provider is None
+    assert loaded.primary_provider == "stub"

@@ -5,21 +5,27 @@ from typing import Any
 
 import httpx
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.models import ChatCompletionRequest, Message, ProviderResponse, Usage
 from app.providers.base import LLMProvider, ProviderError
 
 
 class AnthropicClient(LLMProvider):
     name = "anthropic"
-    base_url = "https://api.anthropic.com/v1"
 
-    def __init__(self, http_client: httpx.AsyncClient) -> None:
+    def __init__(self, http_client: httpx.AsyncClient, settings: Settings | None = None) -> None:
+        """Hold the HTTP client and read credentials, endpoint and timeout from settings.
+
+        Settings are a parameter so the lifespan hands over the same object the
+        rest of the app uses. The fallback to the process wide settings keeps a
+        bare AnthropicClient(client) working for anything that already builds one.
+        """
         self.http_client = http_client
-        self.settings = get_settings()
+        self.settings = settings or get_settings()
         if not self.settings.anthropic_api_key:
             raise ValueError("ANTHROPIC_API_KEY is not set")
         self.api_key: str = self.settings.anthropic_api_key
+        self.base_url = self.settings.anthropic_base_url
 
         self.pricing = {
             "claude-3-haiku-20240307": {"input": 0.25 / 1_000_000, "output": 1.25 / 1_000_000},
@@ -60,7 +66,7 @@ class AnthropicClient(LLMProvider):
                 f"{self.base_url}/messages",
                 headers=headers,
                 json=payload,
-                timeout=10.0
+                timeout=self.settings.provider_timeout_seconds,
             )
             response.raise_for_status()
             data = response.json()
