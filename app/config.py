@@ -13,7 +13,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ProviderName = Literal["stub", "openai", "anthropic"]
@@ -117,6 +117,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ANTHROPIC_API_KEY", "SEMCACHE_ANTHROPIC_API_KEY"),
     )
 
+    # Model routing. When enabled, single-turn short prompts (no code fence, under
+    # routing_simple_max_tokens) are sent to the cheap model instead of whatever
+    # model the caller requested. The cache key still uses the requested model (see
+    # section 33.7 in the PRD), so routing changes do not invalidate existing entries.
+    # routing_cheap_model is required when routing_enabled=True, and rejected at
+    # startup otherwise, so wiring errors surface before the first request.
+    routing_enabled: bool = False
+    routing_cheap_model: str | None = None
+    routing_simple_max_tokens: int = Field(default=512, gt=0)
+
+    # Metrics. Latency samples are stored in a bounded deque so the gateway can
+    # run for days without unbounded memory growth. The window size is a count of
+    # samples (requests), not a duration, so it is easy to reason about memory use.
+    metrics_latency_window: int = Field(default=10_000, gt=0)
 
     @field_validator("chroma_host")
     @classmethod
@@ -153,6 +167,20 @@ class Settings(BaseSettings):
         if parsed.path in ("", "/"):
             return value.rstrip("/") + "/v1/traces"
         return value
+
+    @model_validator(mode="after")
+    def _routing_cheap_model_required_when_enabled(self) -> Settings:
+        """Require routing_cheap_model when routing_enabled=True.
+
+        A misconfigured router silently falls back to the requested model,
+        which is misleading. Catching the missing value at startup makes the
+        misconfiguration explicit before any request is served.
+        """
+        if self.routing_enabled and not self.routing_cheap_model:
+            raise ValueError(
+                "routing_cheap_model is required when routing_enabled=True"
+            )
+        return self
 
     @property
     def chroma_endpoint(self) -> tuple[str, int, bool]:
