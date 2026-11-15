@@ -130,6 +130,7 @@ Errors carry a code, a message and a request identifier:
 
 - `400 INVALID_REQUEST` when the body fails schema validation.
 - `401 MISSING_API_KEY` when no caller key is supplied.
+- `413 REQUEST_TOO_LARGE` when the body is over `SEMCACHE_MAX_REQUEST_BYTES`, which defaults to 1 MiB.
 - `429 TOKEN_BUDGET_EXCEEDED` when the bucket is exhausted, with a retry hint derived from the refill rate.
 - `502 ALL_PROVIDERS_UNAVAILABLE` when every configured provider has failed or has an open breaker.
 - `503 DEPENDENCY_UNAVAILABLE` when Redis is unreachable and admission can't be decided.
