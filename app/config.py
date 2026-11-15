@@ -87,6 +87,13 @@ class Settings(BaseSettings):
     # connection attempt that is going to fail.
     chroma_reconnect_seconds: float = Field(default=30.0, gt=0)
 
+    # How long one call to Chroma may take before it is treated as an outage. A
+    # vector store that has hung raises nothing, so without a bound a request
+    # would wait on it for as long as it stayed hung, and the reconnect cooldown
+    # above would never get the chance to start. Two seconds is far beyond a
+    # healthy local query and well short of a caller giving up on the request.
+    chroma_timeout_seconds: float = Field(default=2.0, gt=0)
+
     # OpenTelemetry tracing. Disabled by default so the gateway starts with no
     # collector present and no errors.  The endpoint is where the OTLP exporter
     # sends spans; None means tracing is a no-op even if enabled, which is the
