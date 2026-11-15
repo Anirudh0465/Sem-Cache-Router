@@ -50,6 +50,8 @@ SEMCACHE_CACHE_STATUS: str = "semcache.cache_status"
 SEMCACHE_SIMILARITY_SCORE: str = "semcache.similarity_score"
 SEMCACHE_BREAKER_STATE: str = "semcache.breaker_state"
 SEMCACHE_COST_USD: str = "semcache.cost_usd"
+SEMCACHE_ROUTED_MODEL: str = "semcache.routed_model"
+SEMCACHE_ROUTING_REASON: str = "semcache.routing_reason"
 
 _TRACER_NAME = "semcache-router"
 
