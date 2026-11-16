@@ -133,6 +133,14 @@ class Settings(BaseSettings):
     # when this is switched on deliberately in a development configuration.
     log_prompts: bool = False
 
+    # Metrics. The latency lists are capped at this many samples; exact
+    # percentiles are then computed over the most recent N records rather than
+    # since process start.  A larger window gives more accurate long-run
+    # percentiles; a smaller one reduces steady-state memory use.  Must be
+    # greater than zero because a window of zero would make every sample
+    # invisible.
+    metrics_latency_window: int = Field(default=10_000, gt=0)
+
     # Caller authentication. The key is the identity a token budget is charged
     # against, so it cannot be optional once the limiter exists. Until then
     # there is nothing to authorise against, and any non-empty bearer token is
@@ -180,12 +188,6 @@ class Settings(BaseSettings):
     routing_enabled: bool = False
     routing_cheap_model: str | None = None
     routing_simple_max_tokens: int = Field(default=512, gt=0)
-
-    # Metrics. Latency samples are stored in a bounded deque so the gateway can
-    # run for days without unbounded memory growth. The window size is a count of
-    # samples (requests), not a duration, so it is easy to reason about memory use.
-    metrics_latency_window: int = Field(default=10_000, gt=0)
-
 
     @field_validator("chroma_host")
     @classmethod
