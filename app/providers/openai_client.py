@@ -4,20 +4,26 @@ import time
 
 import httpx
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.models import ChatCompletionRequest, Message, ProviderResponse, Usage
 from app.providers.base import LLMProvider, ProviderError
 
 
 class OpenAIClient(LLMProvider):
     name = "openai"
-    base_url = "https://api.openai.com/v1"
 
-    def __init__(self, http_client: httpx.AsyncClient) -> None:
+    def __init__(self, http_client: httpx.AsyncClient, settings: Settings | None = None) -> None:
+        """Hold the HTTP client and read credentials, endpoint and timeout from settings.
+
+        Settings are a parameter so the lifespan hands over the same object the
+        rest of the app uses. The fallback to the process wide settings keeps a
+        bare OpenAIClient(client) working for anything that already builds one.
+        """
         self.http_client = http_client
-        self.settings = get_settings()
+        self.settings = settings or get_settings()
         if not self.settings.openai_api_key:
             raise ValueError("OPENAI_API_KEY is not set")
+        self.base_url = self.settings.openai_base_url
 
         self.pricing = {
             "gpt-4o-mini": {"input": 0.150 / 1_000_000, "output": 0.600 / 1_000_000},
@@ -39,7 +45,7 @@ class OpenAIClient(LLMProvider):
                 f"{self.base_url}/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=10.0
+                timeout=self.settings.provider_timeout_seconds,
             )
             response.raise_for_status()
             data = response.json()

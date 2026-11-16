@@ -10,8 +10,9 @@ from __future__ import annotations
 import uuid
 
 from fastapi import Request
+from fastapi.responses import JSONResponse
 
-from app.models import ErrorCode
+from app.models import ErrorCode, ErrorDetail, ErrorResponse
 
 
 class GatewayError(Exception):
@@ -34,6 +35,34 @@ class GatewayError(Exception):
         self.message = message
         self.status_code = status_code
         self.retry_after_seconds = retry_after_seconds
+
+
+def error_response(
+    status_code: int,
+    code: ErrorCode,
+    message: str,
+    request_id: str,
+    retry_after_seconds: int | None = None,
+) -> JSONResponse:
+    """Render the one error shape the API is documented to return.
+
+    Module level rather than nested in the app factory, because an error can
+    arise before the app's handlers run, in a middleware that rejects a request
+    outright. Both paths build the envelope here, so it cannot drift between them.
+    """
+    body = ErrorResponse(
+        error=ErrorDetail(
+            code=code,
+            message=message,
+            retry_after_seconds=retry_after_seconds,
+            request_id=request_id,
+        )
+    )
+    return JSONResponse(
+        status_code=status_code,
+        content=body.model_dump(mode="json"),
+        headers={"x-request-id": request_id},
+    )
 
 
 def request_id(request: Request) -> str:
