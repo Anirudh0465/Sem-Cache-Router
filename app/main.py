@@ -150,14 +150,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Secondary provider. Used when the primary's circuit breaker is open.
     # build_provider raises for unimplemented names, so a secondary that is not
-    # yet supported degrades to None rather than stopping startup.
+    # yet supported degrades to None rather than stopping startup. No secondary
+    # configured (the default) also means None, so failover is opt-in.
     if getattr(app.state, "secondary_provider", None) is None:
-        try:
-            app.state.secondary_provider = build_provider(
-                settings.secondary_provider, settings
-            )
-        except ValueError:
-            app.state.secondary_provider = None
+        secondary_name = settings.secondary_provider
+        app.state.secondary_provider = None
+        if secondary_name is not None:
+            try:
+                app.state.secondary_provider = build_provider(secondary_name, settings)
+            except ValueError:
+                pass
 
     # Tier 2. None when switched off, and the route guards on it, the same
     # pattern as the limiter, so the position of the lookup in the pipeline is
