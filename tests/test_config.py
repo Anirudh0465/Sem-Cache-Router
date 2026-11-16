@@ -129,6 +129,18 @@ def test_an_unusable_otel_endpoint_is_rejected_at_startup(url: str) -> None:
         settings(otel_exporter_endpoint=url)
 
 
+def test_metrics_latency_window_defaults_to_ten_thousand() -> None:
+    """The default window is large enough for a typical benchmark run."""
+    assert settings().metrics_latency_window == 10_000
+
+
+@pytest.mark.parametrize("bad", [0, -1, -100])
+def test_metrics_latency_window_rejects_non_positive(bad: int) -> None:
+    """A window of zero or less would make every sample invisible at startup."""
+    with pytest.raises(ValidationError):
+        settings(metrics_latency_window=bad)
+
+
 # --- providers -------------------------------------------------------------------------------
 
 

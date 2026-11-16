@@ -119,7 +119,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.limiter = None
 
     if getattr(app.state, "metrics", None) is None:
-        app.state.metrics = Metrics()
+        app.state.metrics = Metrics(settings.metrics_latency_window)
 
     # Tier 2. None when switched off, and the route guards on it, the same
     # pattern as the limiter, so the position of the lookup in the pipeline is

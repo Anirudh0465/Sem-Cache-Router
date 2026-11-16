@@ -133,6 +133,14 @@ class Settings(BaseSettings):
     # when this is switched on deliberately in a development configuration.
     log_prompts: bool = False
 
+    # Metrics. The latency lists are capped at this many samples; exact
+    # percentiles are then computed over the most recent N records rather than
+    # since process start.  A larger window gives more accurate long-run
+    # percentiles; a smaller one reduces steady-state memory use.  Must be
+    # greater than zero because a window of zero would make every sample
+    # invisible.
+    metrics_latency_window: int = Field(default=10_000, gt=0)
+
     # Caller authentication. The key is the identity a token budget is charged
     # against, so it cannot be optional once the limiter exists. Until then
     # there is nothing to authorise against, and any non-empty bearer token is
