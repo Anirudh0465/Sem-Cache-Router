@@ -36,6 +36,7 @@ def test_fresh_metrics_start_at_zero() -> None:
     assert snap["misses"] == 0
     assert snap["throttled_requests"] == 0
     assert snap["breaker_failovers"] == 0
+    assert snap["tier2_evicted_total"] == 0
     assert snap["total_provider_spend_usd"] == 0.0
     assert snap["latency_hit_p50_ms"] is None
     assert snap["latency_miss_p50_ms"] is None
@@ -65,6 +66,14 @@ def test_two_hits_produce_count_of_two() -> None:
     m.record_tier1_hit()
     m.record_tier1_hit()
     assert m.snapshot()["tier1_hits"] == 2
+
+
+def test_evictions_accumulate_across_passes() -> None:
+    """record_evicted adds the size of each pass, so the total is entries removed to date."""
+    m = Metrics()
+    m.record_evicted(3)
+    m.record_evicted(2)
+    assert m.snapshot()["tier2_evicted_total"] == 5
 
 
 def test_throttled_increments() -> None:
@@ -284,7 +293,7 @@ def test_metrics_endpoint_returns_all_fields(client: TestClient) -> None:
     required = {
         "tier1_hits", "tier2_hits", "misses",
         "requests_total", "hit_ratio", "tier1_hit_ratio", "tier2_hit_ratio",
-        "throttled_requests", "breaker_failovers",
+        "throttled_requests", "breaker_failovers", "tier2_evicted_total",
         "total_provider_spend_usd",
         "latency_window", "hit_sample_count", "miss_sample_count",
         "latency_hit_p50_ms", "latency_hit_p95_ms",

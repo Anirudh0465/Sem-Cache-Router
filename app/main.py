@@ -23,29 +23,16 @@ from fastapi.responses import JSONResponse
 
 from app.api import chat, health
 from app.cache.embedder import OnnxEmbedder
+from app.cache.eviction import start_eviction, stop_eviction
 from app.cache.exact_cache import ExactCache
 from app.cache.semantic_cache import SemanticCache
 from app.config import Settings, get_settings
-from app.errors import GatewayError, request_id
-from app.models import ErrorCode, ErrorDetail, ErrorResponse
-from app.providers.base import LLMProvider
-from app.providers.stub import StubProvider
+from app.errors import GatewayError, error_response, request_id
+from app.models import ErrorCode
+from app.providers.factory import install_providers
+from app.request_limits import BodySizeLimit
 from app.telemetry.metrics import Metrics
 from app.telemetry.tracing import install_tracing
-
-
-def build_provider(name: str, settings: Settings) -> LLMProvider:
-    """Construct the configured provider.
-
-    Only the stub exists today. The real adapters slot in here without the route
-    changing, which is the point of the common interface.
-    """
-    if name == "stub":
-        return StubProvider()
-    raise ValueError(
-        f"provider {name!r} is configured but not implemented yet; "
-        "set SEMCACHE_PRIMARY_PROVIDER=stub"
-    )
 
 
 def chroma_client_factory(settings: Settings) -> Callable[[], Any]:
@@ -90,6 +77,7 @@ async def build_semantic_cache(settings: Settings) -> SemanticCache:
         ttl_seconds=settings.cache_ttl_seconds,
         threshold=settings.similarity_threshold,
         reconnect_seconds=settings.chroma_reconnect_seconds,
+        timeout_seconds=settings.chroma_timeout_seconds,
     )
 
 
@@ -115,8 +103,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.redis = Redis.from_url(settings.redis_url, decode_responses=True)
         owns_redis = True
 
-    if getattr(app.state, "provider", None) is None:
-        app.state.provider = build_provider(settings.primary_provider, settings)
+    # The provider, and the router that puts it and any secondary behind their own
+    # breakers. The client they share is closed below, only if this opened it.
+    http_client = await install_providers(app.state, settings)
 
     if getattr(app.state, "cache", None) is None:
         app.state.cache = ExactCache(app.state.redis, settings.cache_ttl_seconds)
@@ -135,9 +124,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Tier 2. None when switched off, and the route guards on it, the same
     # pattern as the limiter, so the position of the lookup in the pipeline is
     # fixed whether or not a vector store is configured.
+    #
+    # The housekeeping task is started only for a cache built here, the same rule
+    # as every connection: a cache a test supplied is not ours to run jobs on.
+    eviction_task: asyncio.Task[None] | None = None
     if getattr(app.state, "semantic_cache", None) is None:
         app.state.semantic_cache = (
             await build_semantic_cache(settings) if settings.semantic_cache_enabled else None
+        )
+        eviction_task = start_eviction(
+            app.state.semantic_cache,
+            interval_seconds=settings.eviction_interval_seconds,
+            on_evicted=app.state.metrics.record_evicted,
         )
 
     # Tracing. install_tracing returns None when tracing is disabled, which
@@ -154,10 +152,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await stop_eviction(eviction_task)
         if owns_tracing and app.state.tracer_provider is not None:
             app.state.tracer_provider.shutdown()
         if owns_redis:
             await app.state.redis.aclose()
+        if http_client is not None:
+            await http_client.aclose()
 
 
 def create_app() -> FastAPI:
@@ -174,28 +175,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(chat.router)
-
-    def envelope(
-        status_code: int,
-        code: ErrorCode,
-        message: str,
-        request_id: str,
-        retry_after_seconds: int | None = None,
-    ) -> JSONResponse:
-        """Render the one error shape the API is documented to return."""
-        body = ErrorResponse(
-            error=ErrorDetail(
-                code=code,
-                message=message,
-                retry_after_seconds=retry_after_seconds,
-                request_id=request_id,
-            )
-        )
-        return JSONResponse(
-            status_code=status_code,
-            content=body.model_dump(mode="json"),
-            headers={"x-request-id": request_id},
-        )
+    app.add_middleware(BodySizeLimit)
 
     @app.exception_handler(RequestValidationError)
     async def on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -205,7 +185,7 @@ def create_app() -> FastAPI:
         returns 422 out of the box, so without this handler the API would
         quietly disagree with its own documentation.
         """
-        return envelope(
+        return error_response(
             400,
             ErrorCode.INVALID_REQUEST,
             "Request body failed schema validation.",
@@ -215,7 +195,7 @@ def create_app() -> FastAPI:
     @app.exception_handler(GatewayError)
     async def on_gateway_error(request: Request, exc: GatewayError) -> JSONResponse:
         """Render any error the routes raise deliberately."""
-        return envelope(
+        return error_response(
             exc.status_code,
             exc.code,
             exc.message,

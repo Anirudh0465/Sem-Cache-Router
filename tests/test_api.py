@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict
 
 from app.providers.stub import StubProvider
+from tests.conftest import router_around
 
 AUTH = {"Authorization": "Bearer test-key"}
 PROMPT = "What is the capital of France?"
@@ -179,7 +180,7 @@ def test_error_body_carries_a_request_id(client: TestClient) -> None:
 
 def test_provider_failure_is_502(client: TestClient) -> None:
     """With nothing left to fail over to, the honest answer is 502."""
-    client.app.state.provider = StubProvider(fail_times=1)  # type: ignore[attr-defined]
+    client.app.state.router = router_around(StubProvider(fail_times=1))  # type: ignore[attr-defined]
     response = post(client, body("something never cached"))
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "ALL_PROVIDERS_UNAVAILABLE"

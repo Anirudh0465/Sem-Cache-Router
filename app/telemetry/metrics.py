@@ -37,6 +37,7 @@ class Metrics:
         self.misses = 0
         self.throttled_requests = 0
         self.breaker_failovers = 0
+        self.tier2_evicted_total = 0
         self.total_provider_spend_usd = 0.0
         self._hit_latencies: deque[float] = deque(maxlen=latency_window)
         self._miss_latencies: deque[float] = deque(maxlen=latency_window)
@@ -65,6 +66,11 @@ class Metrics:
         """Count a request rerouted by the circuit breaker."""
         with self._lock:
             self.breaker_failovers += 1
+
+    def record_evicted(self, count: int) -> None:
+        """Count expired Tier 2 entries removed by a housekeeping pass."""
+        with self._lock:
+            self.tier2_evicted_total += count
 
     def add_spend(self, amount: float) -> None:
         """Accumulate provider cost in USD."""
@@ -118,6 +124,7 @@ class Metrics:
                 "tier2_hit_ratio": tier2_hit_ratio,
                 "throttled_requests": self.throttled_requests,
                 "breaker_failovers": self.breaker_failovers,
+                "tier2_evicted_total": self.tier2_evicted_total,
                 "total_provider_spend_usd": self.total_provider_spend_usd,
                 "latency_window": self._latency_window,
                 "hit_sample_count": len(self._hit_latencies),
