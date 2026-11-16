@@ -19,6 +19,7 @@ from opentelemetry.trace import StatusCode
 
 from app.cache.semantic_cache import SemanticHit, Tier2Result
 from app.providers.stub import StubProvider
+from tests.conftest import router_around
 
 AUTH = {"Authorization": "Bearer test-key"}
 MODEL = "gpt-4o-mini"
@@ -99,7 +100,7 @@ def test_a_miss_produces_one_span_with_every_documented_attribute(
     assert attrs["gen_ai.usage.output_tokens"] > 0
     assert attrs["semcache.cache_status"] == "miss"
     assert attrs["semcache.cost_usd"] == 0.0
-    assert attrs["semcache.breaker_state"] == "not_configured"
+    assert attrs["semcache.breaker_state"] == "closed"
     assert "semcache.similarity_score" not in attrs
     assert span.status.status_code == StatusCode.UNSET
 
@@ -193,7 +194,7 @@ def test_a_failure_is_logged_with_its_error_code(
     code: str,
 ) -> None:
     """At warning level, so failures stand out from routine traffic."""
-    client.app.state.provider = provider  # type: ignore[attr-defined]
+    client.app.state.router = router_around(provider)  # type: ignore[attr-defined]
     with caplog.at_level("INFO", logger="semcache.request"):
         client.post("/v1/chat/completions", json=body(), headers=headers)
     record = next(r for r in caplog.records if r.name == "semcache.request")

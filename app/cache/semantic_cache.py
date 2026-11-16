@@ -114,6 +114,7 @@ class SemanticCache:
         ttl_seconds: int,
         threshold: float,
         reconnect_seconds: float = 30.0,
+        timeout_seconds: float = 2.0,
         clock: Callable[[], float] = time.time,
     ) -> None:
         """Hold what the cache needs; connect to nothing yet.
@@ -125,6 +126,11 @@ class SemanticCache:
         After a failure the cache stays unavailable for reconnect_seconds before
         trying again. Without that, every request during an outage would pay for
         a connection attempt that is going to fail.
+
+        Every call into Chroma is also given timeout_seconds. A vector store that
+        has hung, rather than refused the connection, raises nothing, so without
+        a bound the failure handling above would never run and each request would
+        wait on it indefinitely.
         """
         self._client_factory = client_factory
         self._embedder = embedder
@@ -132,6 +138,7 @@ class SemanticCache:
         self._ttl_seconds = ttl_seconds
         self._threshold = threshold
         self._reconnect_seconds = reconnect_seconds
+        self._timeout_seconds = timeout_seconds
         self._clock = clock
         self._collection: Any = None
         self._unavailable_until = 0.0
@@ -169,18 +176,48 @@ class SemanticCache:
         self._collection = None
         self._unavailable_until = self._clock() + self._reconnect_seconds
 
+    def _cooling_down(self) -> bool:
+        """Whether a recent failure is still being waited out.
+
+        Answered on the event loop, from two attributes, so a request that arrives
+        during an outage learns it without taking a worker thread. The threads
+        are what a hung Chroma holds on to, and a cooldown check that needed one
+        would queue behind them.
+        """
+        return self._collection is None and self._clock() < self._unavailable_until
+
+    async def _within_timeout(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Run a blocking call in a worker thread, giving up after timeout_seconds.
+
+        Raises TimeoutError if the call has not finished in time. Giving up
+        releases the request, not the thread: a thread cannot be interrupted, so
+        an abandoned call runs on until Chroma answers or the connection fails.
+        That is bounded by the cooldown, because no new call is started while it
+        runs.
+        """
+        return await asyncio.wait_for(
+            asyncio.to_thread(func, *args, **kwargs), timeout=self._timeout_seconds
+        )
+
     async def _call(self, operation: str, *args: Any, **kwargs: Any) -> Any:
         """Run one collection method off the event loop, degrading on any failure.
 
-        Returns UNAVAILABLE when Chroma cannot be reached or the call fails,
-        after marking the cache unavailable. Every Chroma call goes through
-        here, so there is one place that decides what an outage means.
+        Returns UNAVAILABLE when Chroma cannot be reached, does not answer in
+        time, or the call fails, after marking the cache unavailable. Every Chroma
+        call goes through here, so there is one place that decides what an outage
+        means.
         """
-        collection = await asyncio.to_thread(self._get_collection)
+        if self._cooling_down():
+            return UNAVAILABLE
+        try:
+            collection = await self._within_timeout(self._get_collection)
+        except TimeoutError:
+            self._mark_unavailable("connect")
+            return UNAVAILABLE
         if collection is None:
             return UNAVAILABLE
         try:
-            return await asyncio.to_thread(getattr(collection, operation), *args, **kwargs)
+            return await self._within_timeout(getattr(collection, operation), *args, **kwargs)
         except Exception:
             self._mark_unavailable(operation)
             return UNAVAILABLE
