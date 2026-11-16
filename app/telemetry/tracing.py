@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -108,6 +109,34 @@ def request_span(
         if provider is not None
         else trace.get_tracer(_TRACER_NAME)
     )
+    with tracer.start_as_current_span(name) as span:
+        yield span
+
+
+def get_tracer(state: Any) -> trace.Tracer:
+    """Return a tracer backed by the app's provider, falling back to the global.
+
+    Tests seed app.state.tracer_provider with an in-memory provider. Using that
+    provider for child spans ensures they appear in the same exporter as the
+    parent, so a test that checks span counts sees everything. When no provider
+    is seeded, the global tracer is used, which is a no-op when tracing is off.
+    """
+    provider: TracerProvider | None = getattr(state, "tracer_provider", None)
+    if provider is not None:
+        return provider.get_tracer(_TRACER_NAME)
+    return trace.get_tracer(_TRACER_NAME)
+
+
+@contextmanager
+def child_span(name: str, state: Any) -> Iterator[trace.Span]:
+    """Open a child span under the current active span.
+
+    Uses the app's tracer provider so test exporters capture it. The span is a
+    child of whatever span is currently active — in the request path that is the
+    top-level ``request_span`` opened in the route handler. When tracing is
+    disabled the tracer is a no-op and this context manager is effectively free.
+    """
+    tracer = get_tracer(state)
     with tracer.start_as_current_span(name) as span:
         yield span
 

@@ -224,9 +224,12 @@ def test_chroma_down_sets_span_attribute_unavailable(fake_clock: FakeClock) -> N
         client.post("/v1/chat/completions", json=_body(), headers=AUTH)
     provider.shutdown()
 
-    spans = exporter.get_finished_spans()
-    assert len(spans) == 1
-    assert spans[0].attributes.get("semcache.tier2_status") == "unavailable"  # type: ignore[union-attr]
+    # Main now emits child spans too; the status is on the request span only.
+    statuses = [
+        span.attributes.get("semcache.tier2_status")  # type: ignore[union-attr]
+        for span in exporter.get_finished_spans()
+    ]
+    assert statuses.count("unavailable") == 1
 
 
 # ---------------------------------------------------------------------------

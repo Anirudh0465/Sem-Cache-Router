@@ -1,12 +1,14 @@
-# Compose stack: gateway, redis, chromadb.
+# Compose stack: gateway, redis, chromadb, jaeger.
 #
-# Will define three services:
+# Will define four services:
 #
 #   gateway   built from the Dockerfile, the only service with a published
 #             port, configured entirely by environment variables
 #   redis     Tier 1 cache and the rate limiter buckets, started with
 #             appendonly yes, mounting a named volume
 #   chromadb  Tier 2 vector index, mounting a named volume
+#   jaeger    all-in-one trace collector and UI; gateway ships spans to its
+#             OTLP/HTTP endpoint on port 4318 and the UI is on 16686
 #
 # Both stateful services use named volumes because state must survive a
 # container restart. Without that, a benchmark run started right after a restart
@@ -29,10 +31,17 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      # Enable tracing and point it at Jaeger's OTLP/HTTP ingest. These
+      # override whatever is in .env so the Compose stack always traces.
+      SEMCACHE_TRACING_ENABLED: "true"
+      SEMCACHE_OTEL_EXPORTER_ENDPOINT: "http://jaeger:4318"
     depends_on:
       redis:
         condition: service_healthy
       chromadb:
+        condition: service_healthy
+      jaeger:
         condition: service_healthy
     restart: unless-stopped
 
@@ -58,6 +67,21 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4318:4318"     # OTLP/HTTP ingest (used by gateway)
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:14269/ | grep -q ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
       start_period: 10s
     restart: unless-stopped
 
