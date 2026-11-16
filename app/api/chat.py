@@ -37,7 +37,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request, Response
 
-from app.cache.semantic_cache import SemanticHit
+from app.cache.semantic_cache import SemanticHit, Tier2Result
 from app.errors import GatewayError, request_id
 from app.models import (
     CacheStatus,
@@ -179,7 +179,10 @@ async def _serve(
     # Step 5. Tier 2, only after an exact miss, since embedding is the
     # expensive step and an exact repeat does not need it.
     with child_span("cache tier2 lookup", state):
-        semantic = await _lookup_tier2(state, payload)
+        semantic, tier2_status = await _lookup_tier2(state, payload)
+    outcome.tier2_status = tier2_status
+    if tier2_status == "unavailable":
+        metrics.record_tier2_unavailable()
     if semantic is not None:
         await _release_for_hit(limiter, reservation)
         metrics.record_tier2_hit()
@@ -281,22 +284,34 @@ async def _release_for_hit(limiter: Any, reservation: Any) -> None:
         await limiter.release(reservation)
 
 
-async def _lookup_tier2(state: Any, payload: ChatCompletionRequest) -> SemanticHit | None:
-    """Search the semantic cache, or return None if it is off or anything fails.
+async def _lookup_tier2(
+    state: Any, payload: ChatCompletionRequest
+) -> tuple[SemanticHit | None, str | None]:
+    """Search the semantic cache; return the hit and a status string.
 
-    The semantic cache already degrades on a Chroma outage. This catches the
-    rest, such as an embedding failure, because Tier 2 must never be the reason
-    a request fails: the worst it may cost is the hit.
+    Status is "disabled" when Tier 2 is not configured, "unavailable" when
+    Chroma could not be reached during this request, or "ok" when the search
+    completed normally (whether or not it was a hit). None is returned only
+    when Tier 1 answered before Tier 2 was tried; that case never reaches here.
+
+    The status is what allows the caller to record a Chroma outage as a
+    separate counter rather than conflating it with a genuine cache miss.
+    Tier 2 must never be the reason a request fails, so exceptions are caught
+    and treated as "ok" (not an outage, some other transient problem).
     """
     semantic_cache = getattr(state, "semantic_cache", None)
     if semantic_cache is None:
-        return None
+        return None, "disabled"
     try:
-        hit: SemanticHit | None = await semantic_cache.search(payload.model, payload.messages)
+        result: Tier2Result = await semantic_cache.search_with_status(
+            payload.model, payload.messages
+        )
     except Exception:
         log.warning("Tier 2 lookup failed; continuing to the provider", exc_info=True)
-        return None
-    return hit
+        return None, "ok"
+    if result.unavailable:
+        return None, "unavailable"
+    return result.hit, "ok"
 
 
 async def _write_tier2(

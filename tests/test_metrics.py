@@ -292,6 +292,7 @@ def test_metrics_endpoint_returns_all_fields(client: TestClient) -> None:
     metrics = client.get("/metrics").json()
     required = {
         "tier1_hits", "tier2_hits", "misses",
+        "tier2_unavailable",
         "requests_total", "hit_ratio", "tier1_hit_ratio", "tier2_hit_ratio",
         "throttled_requests", "breaker_failovers", "tier2_evicted_total",
         "total_provider_spend_usd",

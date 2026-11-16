@@ -35,6 +35,7 @@ class Metrics:
         self.tier1_hits = 0
         self.tier2_hits = 0
         self.misses = 0
+        self.tier2_unavailable = 0
         self.throttled_requests = 0
         self.breaker_failovers = 0
         self.tier2_evicted_total = 0
@@ -56,6 +57,18 @@ class Metrics:
         """Count a cache miss that reached a provider."""
         with self._lock:
             self.misses += 1
+
+    def record_tier2_unavailable(self) -> None:
+        """Count a request where Tier 2 was skipped because Chroma was unreachable.
+
+        Incremented once per request that reached the Tier 2 step and found
+        Chroma down, including requests served during the reconnect cooldown.
+        Each such request is a lost hit opportunity, so the counter rises even
+        when Tier 1 ultimately serves the answer. Tier 2 disabled is not an
+        outage, so it does not increment this counter.
+        """
+        with self._lock:
+            self.tier2_unavailable += 1
 
     def record_throttled(self) -> None:
         """Count a request rejected by the rate limiter."""
@@ -118,6 +131,7 @@ class Metrics:
                 "tier1_hits": self.tier1_hits,
                 "tier2_hits": self.tier2_hits,
                 "misses": self.misses,
+                "tier2_unavailable": self.tier2_unavailable,
                 "requests_total": requests_total,
                 "hit_ratio": hit_ratio,
                 "tier1_hit_ratio": tier1_hit_ratio,

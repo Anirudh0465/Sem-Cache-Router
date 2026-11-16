@@ -20,7 +20,7 @@ from typing import Any
 from opentelemetry import trace
 
 from app.models import Message
-from app.telemetry.tracing import set_cache_outcome, set_gen_ai_attributes
+from app.telemetry.tracing import SEMCACHE_TIER2_STATUS, set_cache_outcome, set_gen_ai_attributes
 
 log = logging.getLogger("semcache.request")
 
@@ -43,6 +43,7 @@ class RequestOutcome:
     breaker_state: str = NO_BREAKER
     cache_status: str | None = None
     similarity: float | None = None
+    tier2_status: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     cost_usd: float = 0.0
@@ -92,6 +93,7 @@ def _log_fields(
         "trace_id": _trace_id_of(span),
         "cache_status": outcome.cache_status,
         "similarity": outcome.similarity,
+        "tier2_status": outcome.tier2_status,
         "provider": outcome.provider,
         "model": outcome.model,
         "input_tokens": outcome.input_tokens,
@@ -136,6 +138,8 @@ def record_request(
             cost_usd=outcome.cost_usd,
             breaker_state=outcome.breaker_state,
         )
+    if outcome.tier2_status is not None:
+        span.set_attribute(SEMCACHE_TIER2_STATUS, outcome.tier2_status)
     if outcome.error_code is not None:
         span.set_attribute(ERROR_TYPE, outcome.error_code)
 
