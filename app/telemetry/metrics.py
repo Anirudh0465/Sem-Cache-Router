@@ -6,16 +6,19 @@
 # app, where every dependency is built in the lifespan so a test can substitute
 # a fresh instance per case.
 #
-# Latency is recorded as elapsed seconds and stored in a plain list, split by
+# Latency is recorded as elapsed seconds and stored in a bounded deque, split by
 # cache status.  The PRD requires p50 and p95 reported separately for hits and
-# misses, because an average across both describes neither.  Storing every
-# sample is simplest, gives exact percentiles, and is fine at benchmark scale
-# where the workload is hundreds to low thousands of queries.  At production
-# scale this would need a streaming sketch; that is not this project.
+# misses, because an average across both describes neither.  Using a deque with
+# maxlen caps memory at O(latency_window) samples per bucket regardless of how
+# long the gateway runs.  Percentiles are exact over the most recent
+# latency_window samples; the /metrics snapshot includes latency_window so
+# a reader knows what window the p95 was computed from.
 
 from __future__ import annotations
 
 import threading
+from collections import deque
+from collections.abc import Sequence
 from typing import Any
 
 
@@ -26,8 +29,9 @@ class Metrics:
     record call from the pool and a snapshot from the event loop can overlap.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, latency_window: int = 10_000) -> None:
         self._lock = threading.Lock()
+        self._latency_window = latency_window
         self.tier1_hits = 0
         self.tier2_hits = 0
         self.misses = 0
@@ -35,8 +39,8 @@ class Metrics:
         self.breaker_failovers = 0
         self.tier2_evicted_total = 0
         self.total_provider_spend_usd = 0.0
-        self._hit_latencies: list[float] = []
-        self._miss_latencies: list[float] = []
+        self._hit_latencies: deque[float] = deque(maxlen=latency_window)
+        self._miss_latencies: deque[float] = deque(maxlen=latency_window)
 
     def record_tier1_hit(self) -> None:
         """Count a Tier 1 exact cache hit."""
@@ -77,7 +81,7 @@ class Metrics:
         """Store one latency sample, split by whether the response was a cache hit.
 
         The split matters because hit latency and miss latency describe
-        different systems — a hash lookup versus a provider round trip — and
+        different systems -- a hash lookup versus a provider round trip -- and
         mixing them into one distribution would let each hide the other.
         """
         with self._lock:
@@ -89,20 +93,42 @@ class Metrics:
     def snapshot(self) -> dict[str, Any]:
         """Return a point-in-time copy of all counters and percentiles.
 
-        Percentiles are computed on read by sorting the sample list.  At
-        benchmark scale this is negligible; the sort is O(n log n) over the
-        number of requests in the run, which is bounded by the committed
-        workload size.
+        Percentiles are computed on read by sorting the sample deque.  The
+        deque holds at most latency_window samples, so the sort is bounded
+        regardless of run time.  latency_window is included in the response so
+        callers know the percentiles are over the most recent N samples, not
+        since process start.  hit_ratio and the per-tier ratios are null when
+        there are no requests, never zero, so a zero in production is always
+        a real zero hit rate and never an artefact of an empty counter.
         """
         with self._lock:
+            requests_total = self.tier1_hits + self.tier2_hits + self.misses
+            total_hits = self.tier1_hits + self.tier2_hits
+
+            if requests_total == 0:
+                hit_ratio = None
+                tier1_hit_ratio = None
+                tier2_hit_ratio = None
+            else:
+                hit_ratio = round(total_hits / requests_total, 6)
+                tier1_hit_ratio = round(self.tier1_hits / requests_total, 6)
+                tier2_hit_ratio = round(self.tier2_hits / requests_total, 6)
+
             return {
                 "tier1_hits": self.tier1_hits,
                 "tier2_hits": self.tier2_hits,
                 "misses": self.misses,
+                "requests_total": requests_total,
+                "hit_ratio": hit_ratio,
+                "tier1_hit_ratio": tier1_hit_ratio,
+                "tier2_hit_ratio": tier2_hit_ratio,
                 "throttled_requests": self.throttled_requests,
                 "breaker_failovers": self.breaker_failovers,
                 "tier2_evicted_total": self.tier2_evicted_total,
                 "total_provider_spend_usd": self.total_provider_spend_usd,
+                "latency_window": self._latency_window,
+                "hit_sample_count": len(self._hit_latencies),
+                "miss_sample_count": len(self._miss_latencies),
                 "latency_hit_p50_ms": self._percentile(self._hit_latencies, 0.50),
                 "latency_hit_p95_ms": self._percentile(self._hit_latencies, 0.95),
                 "latency_miss_p50_ms": self._percentile(self._miss_latencies, 0.50),
@@ -110,7 +136,7 @@ class Metrics:
             }
 
     @staticmethod
-    def _percentile(samples: list[float], pct: float) -> float | None:
+    def _percentile(samples: Sequence[float], pct: float) -> float | None:
         """Compute an exact percentile by linear interpolation over sorted samples.
 
         Returns None when there are no samples, so the /metrics body carries an
