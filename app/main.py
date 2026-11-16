@@ -29,25 +29,10 @@ from app.cache.semantic_cache import SemanticCache
 from app.config import Settings, get_settings
 from app.errors import GatewayError, error_response, request_id
 from app.models import ErrorCode
-from app.providers.base import LLMProvider
-from app.providers.stub import StubProvider
+from app.providers.factory import install_providers
 from app.request_limits import BodySizeLimit
 from app.telemetry.metrics import Metrics
 from app.telemetry.tracing import install_tracing
-
-
-def build_provider(name: str, settings: Settings) -> LLMProvider:
-    """Construct the configured provider.
-
-    Only the stub exists today. The real adapters slot in here without the route
-    changing, which is the point of the common interface.
-    """
-    if name == "stub":
-        return StubProvider()
-    raise ValueError(
-        f"provider {name!r} is configured but not implemented yet; "
-        "set SEMCACHE_PRIMARY_PROVIDER=stub"
-    )
 
 
 def chroma_client_factory(settings: Settings) -> Callable[[], Any]:
@@ -118,8 +103,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.redis = Redis.from_url(settings.redis_url, decode_responses=True)
         owns_redis = True
 
-    if getattr(app.state, "provider", None) is None:
-        app.state.provider = build_provider(settings.primary_provider, settings)
+    # The provider, and the router that puts it and any secondary behind their own
+    # breakers. The client they share is closed below, only if this opened it.
+    http_client = await install_providers(app.state, settings)
 
     if getattr(app.state, "cache", None) is None:
         app.state.cache = ExactCache(app.state.redis, settings.cache_ttl_seconds)
@@ -171,6 +157,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.tracer_provider.shutdown()
         if owns_redis:
             await app.state.redis.aclose()
+        if http_client is not None:
+            await http_client.aclose()
 
 
 def create_app() -> FastAPI:
