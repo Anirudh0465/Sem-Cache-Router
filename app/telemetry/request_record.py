@@ -58,11 +58,15 @@ class RequestOutcome:
 
 
 def breaker_state_of(state: Any) -> str:
-    """Read the breaker's state from app.state, or report that there is none."""
-    breaker = getattr(state, "breaker", None)
-    if breaker is None:
+    """The primary provider's breaker state, or report that there is none.
+
+    Read before the call, so it is what the request started with. A request that
+    fails over replaces it with the state of the provider that answered.
+    """
+    router = getattr(state, "router", None)
+    if router is None:
         return NO_BREAKER
-    return str(breaker.state.value)
+    return str(router.breaker_states()[router.primary.name])
 
 
 def _log_fields(

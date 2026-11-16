@@ -77,6 +77,30 @@ def test_reconnect_cooldown_must_be_positive() -> None:
         settings(chroma_reconnect_seconds=0)
 
 
+def test_the_limiter_is_off_by_default() -> None:
+    """Off by default, so nobody is throttled by a budget they never configured."""
+    assert settings().limiter_enabled is False
+
+
+def test_the_limiter_reserves_a_reply_allowance_by_default() -> None:
+    """Without one, a request that sets no max_tokens would be admitted for its prompt alone."""
+    assert settings().limiter_default_completion_tokens == 256
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_the_reply_allowance_must_be_positive(value: int) -> None:
+    """A zero allowance would admit an open ended reply at no cost."""
+    with pytest.raises(ValidationError):
+        settings(limiter_default_completion_tokens=value)
+
+
+@pytest.mark.parametrize("name", ["bucket_capacity", "bucket_refill_rate"])
+def test_a_bucket_must_have_room_and_refill(name: str) -> None:
+    """A bucket with no capacity or no refill rate would refuse every request, or refuse forever."""
+    with pytest.raises(ValidationError):
+        settings(**{name: 0})
+
+
 @pytest.mark.parametrize(
     ("given", "expected"),
     [
@@ -133,3 +157,66 @@ def test_routing_simple_max_tokens_rejects_non_positive(bad: int) -> None:
     """Zero or negative tokens cannot be a ceiling for a prompt."""
     with pytest.raises(ValidationError):
         settings(routing_simple_max_tokens=bad)
+
+
+# --- providers -------------------------------------------------------------------------------
+
+
+def test_failover_is_opt_in() -> None:
+    """No secondary by default, so the default stub primary demands no vendor's key."""
+    assert settings().secondary_provider is None
+    assert settings().secondary_model is None
+
+
+def test_a_secondary_provider_can_be_chosen() -> None:
+    chosen = settings(primary_provider="openai", secondary_provider="anthropic")
+    assert chosen.secondary_provider == "anthropic"
+
+
+def test_a_provider_cannot_fail_over_to_itself() -> None:
+    with pytest.raises(ValidationError, match="must differ"):
+        settings(primary_provider="openai", secondary_provider="openai")
+
+
+def test_the_adapters_default_to_the_vendors_endpoints() -> None:
+    assert settings().openai_base_url == "https://api.openai.com/v1"
+    assert settings().anthropic_base_url == "https://api.anthropic.com/v1"
+
+
+@pytest.mark.parametrize("name", ["openai_base_url", "anthropic_base_url"])
+def test_a_trailing_slash_on_a_provider_url_is_dropped(name: str) -> None:
+    """The adapters append a path, and a double slash is rejected by some endpoints."""
+    assert getattr(settings(**{name: "http://proxy.internal:9000/v1/"}), name) == (
+        "http://proxy.internal:9000/v1"
+    )
+
+
+@pytest.mark.parametrize("name", ["openai_base_url", "anthropic_base_url"])
+@pytest.mark.parametrize("url", ["api.openai.com/v1", "ftp://proxy/v1", "not a url", "http://"])
+def test_an_unusable_provider_url_is_rejected_at_startup(name: str, url: str) -> None:
+    with pytest.raises(ValidationError):
+        settings(**{name: url})
+
+
+def test_the_provider_timeout_is_generous_by_default() -> None:
+    """A long completion legitimately takes tens of seconds."""
+    assert settings().provider_timeout_seconds == 30.0
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_a_provider_timeout_that_allows_no_time_is_rejected(value: float) -> None:
+    with pytest.raises(ValidationError):
+        settings(provider_timeout_seconds=value)
+
+
+def test_the_example_environment_loads_and_asks_for_nothing_extra() -> None:
+    """scripts/setup.sh copies .env.example into every fresh checkout.
+
+    If it ever set a secondary provider, every new checkout would refuse to start
+    for want of that vendor's key. Loading it here keeps that from happening
+    unnoticed.
+    """
+    loaded = Settings(_env_file=".env.example")  # type: ignore[call-arg]
+
+    assert loaded.secondary_provider is None
+    assert loaded.primary_provider == "stub"

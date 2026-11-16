@@ -6,8 +6,8 @@
 #   3. reserve the estimated token cost, or return 429 and stop
 #   4. check Tier 1, and on a hit release the reservation in full
 #   5. on a Tier 1 miss, embed and search Tier 2
-#   6. on a Tier 2 miss, route a model and call the provider through the breaker
-#   7. on provider failure, let the breaker move to the secondary   (not built)
+#   6. on a Tier 2 miss, call the primary provider through its breaker
+#   7. on provider failure, move to the secondary, in the same request
 #   8. write both tiers with a TTL, reconcile the reservation, return
 #
 # Why the limiter runs before any cache lookup: a budget that depends on what
@@ -16,8 +16,9 @@
 # unrelated caller had cached a minute earlier. The accepted cost is that a
 # caller at their limit is refused an answer that was free to serve.
 #
-# Step 7 is marked in place below rather than omitted, so that the ordering is
-# legible now and the later work has an obvious seam to land in.
+# Steps 6 and 7 are one call, because failover is something the router does inside
+# the call, not something the handler sequences: the handler asks for an answer and
+# is told which provider gave it and whether it had to fail over to get it.
 #
 # Tier 2 is soft where Tier 1 is hard. A Tier 1 failure fails the request,
 # because Redis also decides admission. A Tier 2 failure of any kind costs a
@@ -48,6 +49,7 @@ from app.models import (
     Usage,
 )
 from app.providers.base import ProviderError
+from app.providers.router import AllProvidersFailed
 from app.router import choose_model
 from app.telemetry.request_record import RequestOutcome, breaker_state_of, record_request
 from app.telemetry.tracing import request_span
@@ -190,8 +192,8 @@ async def _serve(
             similarity=semantic.similarity,
         )
 
-    # Step 6. Model routing then provider call. The routing result controls which
-    # model the provider receives; the cache key still uses the requested model.
+    # Step 6. Model routing. The routing result controls which model the provider
+    # is asked for; the cache key still uses the model the caller requested.
     routing = choose_model(payload.model, payload.messages, state.settings)
     outcome.routed_model = routing.model
     outcome.routing_reason = routing.reason
@@ -200,15 +202,9 @@ async def _serve(
     else:
         metrics.record_routed_unchanged()
 
+    # Step 7. The provider call, through its breaker, with failover.
     routed_payload = payload.model_copy(update={"model": routing.model})
-    try:
-        provider_response = await state.provider.complete(routed_payload)
-    except ProviderError as exc:
-        raise GatewayError(
-            ErrorCode.ALL_PROVIDERS_UNAVAILABLE,
-            f"Provider {exc.provider} failed and there is no configured failover.",
-            status_code=502,
-        ) from exc
+    provider_response = await _complete(state, routed_payload, outcome)
 
     # Step 8. Write through and reconcile.
     body = _to_body(provider_response, payload.model)
@@ -242,6 +238,44 @@ async def _serve(
     outcome.output_tokens = provider_response.usage.completion_tokens
     outcome.cost_usd = provider_response.cost_usd
     return _from_cached(body, payload.model, CacheStatus.MISS)
+
+
+async def _complete(
+    state: Any, payload: ChatCompletionRequest, outcome: RequestOutcome
+) -> ProviderResponse:
+    """Get an answer from the first provider that can give one.
+
+    Records on the outcome which provider actually answered and the state its
+    breaker was in, since after a failover that is not the one the request
+    started with, and counts the failover once per request.
+
+    Two failures are told apart. A provider that rejects the request itself as
+    malformed is reported to the caller as a 400: another provider would say the
+    same, and it is the caller's to fix. Every provider failing is a 502, with the
+    detail in the log rather than the response, since it names vendors and status
+    codes the caller has no use for.
+    """
+    try:
+        completion = await state.router.complete(payload)
+    except ProviderError as exc:
+        raise GatewayError(
+            ErrorCode.INVALID_REQUEST,
+            "The provider rejected the request as invalid.",
+            status_code=400,
+        ) from exc
+    except AllProvidersFailed as exc:
+        log.warning("no provider could answer: %s", exc)
+        raise GatewayError(
+            ErrorCode.ALL_PROVIDERS_UNAVAILABLE,
+            "No provider could answer the request.",
+            status_code=502,
+        ) from exc
+
+    outcome.provider = completion.provider
+    outcome.breaker_state = completion.breaker_state
+    if completion.failed_over:
+        state.metrics.record_failover()
+    return completion.response
 
 
 async def _release_for_hit(limiter: Any, reservation: Any) -> None:
