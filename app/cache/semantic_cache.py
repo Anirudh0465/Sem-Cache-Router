@@ -68,6 +68,21 @@ class SemanticHit:
     entry_id: str
 
 
+@dataclass(frozen=True)
+class Tier2Result:
+    """Result of a Tier 2 search, distinguishing a cache miss from a Chroma outage.
+
+    When unavailable is True, Chroma could not be reached and hit is always
+    None. When False, hit is None on a genuine miss and a SemanticHit on a
+    cache hit. The distinction matters because an outage looks identical to a
+    miss at the SemanticHit | None level, so the pipeline cannot tell them
+    apart and cannot record the degradation.
+    """
+
+    hit: SemanticHit | None
+    unavailable: bool
+
+
 def similarity_from_distance(distance: float) -> float:
     """Convert a Chroma cosine distance to a cosine similarity.
 
@@ -237,12 +252,17 @@ class SemanticCache:
             metadatas=[metadata],
         )
 
-    async def search(self, model: str, messages: list[Message]) -> SemanticHit | None:
-        """Return the nearest live entry for this model if it clears the threshold.
+    async def search_with_status(self, model: str, messages: list[Message]) -> Tier2Result:
+        """Return the nearest live entry and whether Chroma was reachable.
 
         Expired entries are filtered out in the query itself, so one is never
         served even before eviction gets to it. The model is filtered too: the
         same prompt against a different model is a different answer.
+
+        Returns Tier2Result.unavailable=True when Chroma could not be reached,
+        so the caller can record the degradation rather than treating it as a
+        routine miss. search() delegates here and discards the status, so
+        existing callers need no change.
         """
         vector = await self._embedder.encode(prompt_text(messages))
         result = await self._call(
@@ -253,8 +273,17 @@ class SemanticCache:
             include=["metadatas", "distances"],
         )
         if result is UNAVAILABLE:
-            return None
-        return self._best_hit(result)
+            return Tier2Result(hit=None, unavailable=True)
+        return Tier2Result(hit=self._best_hit(result), unavailable=False)
+
+    async def search(self, model: str, messages: list[Message]) -> SemanticHit | None:
+        """Return the nearest live entry for this model if it clears the threshold.
+
+        Convenience wrapper over search_with_status that discards the outage
+        flag. Use search_with_status when the caller needs to record whether
+        Chroma was reachable.
+        """
+        return (await self.search_with_status(model, messages)).hit
 
     async def is_available(self) -> bool:
         """Report whether Chroma can be reached right now.

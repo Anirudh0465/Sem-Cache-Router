@@ -13,8 +13,16 @@ pid_alive chroma || die "Chroma on port $CHROMA_PORT was not started by these sc
 
 if [ "${KEEP_CACHE:-0}" != "1" ]; then step "clearing the cache"; reset_cache; fi
 
+metrics_snapshot() {
+  # Print the counters that show degradation. tier2_unavailable should climb
+  # while Chroma is down and stay flat once it is back.
+  curl -sf "$GATEWAY_URL/metrics" \
+    | jq '{tier2_unavailable, tier1_hits, tier2_hits, misses}'
+}
+
 step "before the outage"
 ask "1. stored in both tiers (expect miss)" "$(question 'What is the capital of France?')"
+echo "metrics before outage:"; metrics_snapshot
 
 step "stopping Chroma"
 "$ROOT/scripts/chroma-stop.sh"
@@ -25,6 +33,7 @@ ask "2. a new question with Chroma down: Tier 2 is skipped, not fatal (expect HT
   "$(question 'How do I bake sourdough bread?')"
 ask "3. the first question again: Tier 1 still serves it (expect HTTP 200, exact_hit)" \
   "$(question 'What is the capital of France?')"
+echo "metrics during outage (tier2_unavailable should be 1):"; metrics_snapshot
 
 step "restarting Chroma"
 "$ROOT/scripts/chroma-start.sh"
@@ -36,3 +45,4 @@ echo "health: $(curl -s "$GATEWAY_URL/health" | jq -c .)"
 
 ask "4. a paraphrase of the first question: Tier 2 is back, data intact (expect semantic_hit)" \
   "$(question "Tell me France's capital city.")"
+echo "metrics after recovery (tier2_unavailable stays at 1, tier2_hits goes to 1):"; metrics_snapshot

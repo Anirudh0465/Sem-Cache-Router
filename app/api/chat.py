@@ -37,7 +37,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request, Response
 
-from app.cache.semantic_cache import SemanticHit
+from app.cache.semantic_cache import SemanticHit, Tier2Result
 from app.errors import GatewayError, request_id
 from app.models import (
     CacheStatus,
@@ -52,7 +52,7 @@ from app.providers.base import ProviderError
 from app.providers.router import AllProvidersFailed
 from app.router import choose_model
 from app.telemetry.request_record import RequestOutcome, breaker_state_of, record_request
-from app.telemetry.tracing import request_span
+from app.telemetry.tracing import child_span, request_span
 
 router = APIRouter(tags=["chat"])
 
@@ -156,18 +156,19 @@ async def _serve(
             )
 
     # Step 4. Tier 1.
-    try:
-        cached = await state.cache.get(payload.model, payload.messages)
-    except Exception as exc:
-        # Fail closed. Admission is a no-op today, so a pass through would be
-        # possible, but the ordering contract is the invariant being protected:
-        # a gateway whose failure behaviour changes once the limiter ships is
-        # one nobody can reason about.
-        raise GatewayError(
-            ErrorCode.DEPENDENCY_UNAVAILABLE,
-            "Cache is unreachable, so admission cannot be decided.",
-            status_code=503,
-        ) from exc
+    with child_span("cache tier1 lookup", state):
+        try:
+            cached = await state.cache.get(payload.model, payload.messages)
+        except Exception as exc:
+            # Fail closed. Admission is a no-op today, so a pass through would be
+            # possible, but the ordering contract is the invariant being protected:
+            # a gateway whose failure behaviour changes once the limiter ships is
+            # one nobody can reason about.
+            raise GatewayError(
+                ErrorCode.DEPENDENCY_UNAVAILABLE,
+                "Cache is unreachable, so admission cannot be decided.",
+                status_code=503,
+            ) from exc
 
     if cached is not None:
         await _release_for_hit(limiter, reservation)
@@ -178,7 +179,11 @@ async def _serve(
 
     # Step 5. Tier 2, only after an exact miss, since embedding is the
     # expensive step and an exact repeat does not need it.
-    semantic = await _lookup_tier2(state, payload)
+    with child_span("cache tier2 lookup", state):
+        semantic, tier2_status = await _lookup_tier2(state, payload)
+    outcome.tier2_status = tier2_status
+    if tier2_status == "unavailable":
+        metrics.record_tier2_unavailable()
     if semantic is not None:
         await _release_for_hit(limiter, reservation)
         metrics.record_tier2_hit()
@@ -202,9 +207,12 @@ async def _serve(
     else:
         metrics.record_routed_unchanged()
 
-    # Step 7. The provider call, through its breaker, with failover.
+    # Steps 6 and 7. The provider call, through its breaker, with failover. The
+    # child span covers the whole of it, so a failover shows in the trace as one
+    # span that took two attempts rather than as unexplained latency.
     routed_payload = payload.model_copy(update={"model": routing.model})
-    provider_response = await _complete(state, routed_payload, outcome)
+    with child_span(f"provider call {routing.model}", state):
+        provider_response = await _complete(state, routed_payload, outcome)
 
     # Step 8. Write through and reconcile.
     body = _to_body(provider_response, payload.model)
@@ -288,22 +296,34 @@ async def _release_for_hit(limiter: Any, reservation: Any) -> None:
         await limiter.release(reservation)
 
 
-async def _lookup_tier2(state: Any, payload: ChatCompletionRequest) -> SemanticHit | None:
-    """Search the semantic cache, or return None if it is off or anything fails.
+async def _lookup_tier2(
+    state: Any, payload: ChatCompletionRequest
+) -> tuple[SemanticHit | None, str | None]:
+    """Search the semantic cache; return the hit and a status string.
 
-    The semantic cache already degrades on a Chroma outage. This catches the
-    rest, such as an embedding failure, because Tier 2 must never be the reason
-    a request fails: the worst it may cost is the hit.
+    Status is "disabled" when Tier 2 is not configured, "unavailable" when
+    Chroma could not be reached during this request, or "ok" when the search
+    completed normally (whether or not it was a hit). None is returned only
+    when Tier 1 answered before Tier 2 was tried; that case never reaches here.
+
+    The status is what allows the caller to record a Chroma outage as a
+    separate counter rather than conflating it with a genuine cache miss.
+    Tier 2 must never be the reason a request fails, so exceptions are caught
+    and treated as "ok" (not an outage, some other transient problem).
     """
     semantic_cache = getattr(state, "semantic_cache", None)
     if semantic_cache is None:
-        return None
+        return None, "disabled"
     try:
-        hit: SemanticHit | None = await semantic_cache.search(payload.model, payload.messages)
+        result: Tier2Result = await semantic_cache.search_with_status(
+            payload.model, payload.messages
+        )
     except Exception:
         log.warning("Tier 2 lookup failed; continuing to the provider", exc_info=True)
-        return None
-    return hit
+        return None, "ok"
+    if result.unavailable:
+        return None, "unavailable"
+    return result.hit, "ok"
 
 
 async def _write_tier2(

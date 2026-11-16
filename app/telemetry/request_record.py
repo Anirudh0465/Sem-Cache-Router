@@ -23,6 +23,7 @@ from app.models import Message
 from app.telemetry.tracing import (
     SEMCACHE_ROUTED_MODEL,
     SEMCACHE_ROUTING_REASON,
+    SEMCACHE_TIER2_STATUS,
     set_cache_outcome,
     set_gen_ai_attributes,
 )
@@ -48,6 +49,7 @@ class RequestOutcome:
     breaker_state: str = NO_BREAKER
     cache_status: str | None = None
     similarity: float | None = None
+    tier2_status: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     cost_usd: float = 0.0
@@ -69,18 +71,37 @@ def breaker_state_of(state: Any) -> str:
     return str(router.breaker_states()[router.primary.name])
 
 
+def _trace_id_of(span: trace.Span) -> str | None:
+    """Extract the trace ID as a 32-character hex string, or None for no-op spans.
+
+    A no-op span (produced when tracing is disabled) has an invalid span
+    context whose trace_id is zero. Returning None instead of the zero string
+    keeps the log field honest: null means "no trace", not "trace 00000...".
+    """
+    ctx = span.get_span_context()
+    if ctx is None or not ctx.is_valid:
+        return None
+    return format(ctx.trace_id, "032x")
+
+
 def _log_fields(
-    outcome: RequestOutcome, messages: list[Message], log_prompts: bool
+    span: trace.Span,
+    outcome: RequestOutcome,
+    messages: list[Message],
+    log_prompts: bool,
 ) -> dict[str, Any]:
     """The fields of the structured log line, prompt included only on request.
 
     Every documented field is always present, with null where it does not
     apply, so a log query never has to tell "absent" from "not recorded".
+    trace_id lets a log grep land directly on the matching Jaeger trace.
     """
     fields: dict[str, Any] = {
         "request_id": outcome.request_id,
+        "trace_id": _trace_id_of(span),
         "cache_status": outcome.cache_status,
         "similarity": outcome.similarity,
+        "tier2_status": outcome.tier2_status,
         "provider": outcome.provider,
         "model": outcome.model,
         "input_tokens": outcome.input_tokens,
@@ -127,6 +148,8 @@ def record_request(
             cost_usd=outcome.cost_usd,
             breaker_state=outcome.breaker_state,
         )
+    if outcome.tier2_status is not None:
+        span.set_attribute(SEMCACHE_TIER2_STATUS, outcome.tier2_status)
     if outcome.error_code is not None:
         span.set_attribute(ERROR_TYPE, outcome.error_code)
     if outcome.routed_model is not None:
@@ -135,4 +158,4 @@ def record_request(
         span.set_attribute(SEMCACHE_ROUTING_REASON, outcome.routing_reason)
 
     level = logging.WARNING if outcome.error_code else logging.INFO
-    log.log(level, json.dumps(_log_fields(outcome, messages, log_prompts), sort_keys=True))
+    log.log(level, json.dumps(_log_fields(span, outcome, messages, log_prompts), sort_keys=True))

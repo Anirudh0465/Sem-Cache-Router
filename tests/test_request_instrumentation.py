@@ -17,7 +17,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
-from app.cache.semantic_cache import SemanticHit
+from app.cache.semantic_cache import SemanticHit, Tier2Result
 from app.providers.stub import StubProvider
 from tests.conftest import router_around
 
@@ -25,8 +25,8 @@ AUTH = {"Authorization": "Bearer test-key"}
 MODEL = "gpt-4o-mini"
 PROMPT = "What is the capital of France? My account number is 4421-8890."
 LOG_FIELDS = {
-    "request_id", "cache_status", "similarity", "provider", "model", "input_tokens",
-    "output_tokens", "cost_usd", "breaker_state", "error_code", "latency_ms",
+    "request_id", "cache_status", "similarity", "tier2_status", "provider", "model",
+    "input_tokens", "output_tokens", "cost_usd", "breaker_state", "error_code", "latency_ms",
     "routed_model", "routing_reason",
 }
 
@@ -47,11 +47,24 @@ def exporter(client: TestClient) -> Iterator[InMemorySpanExporter]:
     provider.shutdown()
 
 
-def only_span(exporter: InMemorySpanExporter) -> ReadableSpan:
-    """The single span one request should produce."""
+def root_span(exporter: InMemorySpanExporter) -> ReadableSpan:
+    """The top-level span for a request — the one with no parent.
+
+    After PR5 a request produces multiple spans (the root plus child spans for
+    Tier 1, Tier 2 and the provider call). Tests that inspect request-level
+    attributes (cache_status, cost, model) must look at the root span, not any
+    of the children.
+    """
     spans = exporter.get_finished_spans()
-    assert len(spans) == 1, [span.name for span in spans]
-    return spans[0]
+    assert len(spans) >= 1, "expected at least one span"
+    roots = [s for s in spans if s.parent is None]
+    assert len(roots) == 1, [s.name for s in spans]
+    return roots[0]
+
+
+def only_span(exporter: InMemorySpanExporter) -> ReadableSpan:
+    """Alias kept for callers that do not care about child spans."""
+    return root_span(exporter)
 
 
 def log_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
@@ -62,7 +75,7 @@ def log_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
 class FixedSemanticHit:
     """A semantic cache that always answers with a known score."""
 
-    async def search(self, model: str, messages: Any) -> SemanticHit:
+    def _make_hit(self) -> SemanticHit:
         return SemanticHit(
             response_body={
                 "id": "chatcmpl-x", "created": 1, "model": MODEL,
@@ -73,6 +86,12 @@ class FixedSemanticHit:
             entry_id="e1",
         )
 
+    async def search(self, model: str, messages: Any) -> SemanticHit:
+        return self._make_hit()
+
+    async def search_with_status(self, model: str, messages: Any) -> Tier2Result:
+        return Tier2Result(hit=self._make_hit(), unavailable=False)
+
     async def add(self, *args: Any, **kwargs: Any) -> None:
         return None
 
@@ -80,12 +99,17 @@ class FixedSemanticHit:
 # --- spans ----------------------------------------------------------------
 
 
-def test_a_miss_produces_one_span_with_every_documented_attribute(
+def test_a_miss_produces_a_root_span_with_every_documented_attribute(
     client: TestClient, exporter: InMemorySpanExporter
 ) -> None:
-    """PRD section 18.3, on a single span, named by the gen_ai convention."""
+    """PRD section 18.3: root span named by gen_ai convention carries all attributes.
+
+    A miss also produces child spans for the Tier 1 lookup, Tier 2 lookup,
+    and provider call. Those are verified in test_trace_detail.py; this test
+    checks only the root span's attribute set.
+    """
     client.post("/v1/chat/completions", json=body(), headers=AUTH)
-    span = only_span(exporter)
+    span = root_span(exporter)
     attrs = span.attributes or {}
 
     assert span.name == f"chat {MODEL}"
@@ -159,6 +183,8 @@ def test_each_request_writes_exactly_one_log_line_with_every_field(
     assert len(lines) == 1
     assert LOG_FIELDS <= set(lines[0])
     assert lines[0]["cache_status"] == "miss"
+    # The default test client has no semantic cache configured.
+    assert lines[0]["tier2_status"] == "disabled"
     assert lines[0]["similarity"] is None
     assert lines[0]["latency_ms"] >= 0
 
