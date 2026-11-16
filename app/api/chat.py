@@ -6,8 +6,8 @@
 #   3. reserve the estimated token cost, or return 429 and stop
 #   4. check Tier 1, and on a hit release the reservation in full
 #   5. on a Tier 1 miss, embed and search Tier 2
-#   6. on a Tier 2 miss, route a model and call the provider through the breaker
-#   7. on provider failure, let the breaker move to the secondary   (not built)
+#   6. on a Tier 2 miss, call the primary provider through its breaker
+#   7. on provider failure, move to the secondary, in the same request
 #   8. write both tiers with a TTL, reconcile the reservation, return
 #
 # Why the limiter runs before any cache lookup: a budget that depends on what
@@ -16,8 +16,9 @@
 # unrelated caller had cached a minute earlier. The accepted cost is that a
 # caller at their limit is refused an answer that was free to serve.
 #
-# Step 7 is marked in place below rather than omitted, so that the ordering is
-# legible now and the later work has an obvious seam to land in.
+# Steps 6 and 7 are one call, because failover is something the router does inside
+# the call, not something the handler sequences: the handler asks for an answer and
+# is told which provider gave it and whether it had to fail over to get it.
 #
 # Tier 2 is soft where Tier 1 is hard. A Tier 1 failure fails the request,
 # because Redis also decides admission. A Tier 2 failure of any kind costs a
@@ -48,7 +49,7 @@ from app.models import (
     Usage,
 )
 from app.providers.base import ProviderError
-from app.providers.breaker import CircuitBreakerOpen
+from app.providers.router import AllProvidersFailed
 from app.telemetry.request_record import RequestOutcome, breaker_state_of, record_request
 from app.telemetry.tracing import request_span
 
@@ -190,17 +191,8 @@ async def _serve(
             similarity=semantic.similarity,
         )
 
-    # Steps 6 and 7. Call the primary provider through the circuit breaker; if
-    # the breaker is open, fail over to the secondary. Both steps are in
-    # _call_provider so this function stays below the complexity ceiling.
-    try:
-        provider_response = await _call_provider(state, payload, metrics)
-    except ProviderError as exc:
-        raise GatewayError(
-            ErrorCode.ALL_PROVIDERS_UNAVAILABLE,
-            f"Provider {exc.provider} failed and there is no configured failover.",
-            status_code=502,
-        ) from exc
+    # Steps 6 and 7. The provider call, through its breaker, with failover.
+    provider_response = await _complete(state, payload, outcome)
 
     # Step 8. Write through and reconcile.
     body = _to_body(provider_response, payload.model)
@@ -236,36 +228,42 @@ async def _serve(
     return _from_cached(body, payload.model, CacheStatus.MISS)
 
 
-async def _call_provider(
-    state: Any,
-    payload: ChatCompletionRequest,
-    metrics: Any,
+async def _complete(
+    state: Any, payload: ChatCompletionRequest, outcome: RequestOutcome
 ) -> ProviderResponse:
-    """Call the primary provider through the circuit breaker, failing over to secondary.
+    """Get an answer from the first provider that can give one.
 
-    When the breaker is OPEN it raises CircuitBreakerOpen immediately, without
-    touching the network. The secondary provider, if wired, then receives the
-    request and a failover is recorded in metrics. If there is no secondary, the
-    exception is re-raised as a ProviderError so the caller can map it to 502.
+    Records on the outcome which provider actually answered and the state its
+    breaker was in, since after a failover that is not the one the request
+    started with, and counts the failover once per request.
 
-    When no breaker is wired (breaker is None on state), the primary is called
-    directly, which is the pre-wiring behaviour preserved for compatibility.
+    Two failures are told apart. A provider that rejects the request itself as
+    malformed is reported to the caller as a 400: another provider would say the
+    same, and it is the caller's to fix. Every provider failing is a 502, with the
+    detail in the log rather than the response, since it names vendors and status
+    codes the caller has no use for.
     """
-    breaker = getattr(state, "breaker", None)
-    if breaker is None:
-        return await state.provider.complete(payload)
-
     try:
-        return await breaker.call(state.provider.complete, payload)
-    except CircuitBreakerOpen:
-        secondary = getattr(state, "secondary_provider", None)
-        if secondary is None:
-            raise ProviderError(
-                "Primary circuit breaker is open and no secondary provider is configured.",
-                provider=state.provider.name,
-            ) from None
-        metrics.record_failover()
-        return await secondary.complete(payload)
+        completion = await state.router.complete(payload)
+    except ProviderError as exc:
+        raise GatewayError(
+            ErrorCode.INVALID_REQUEST,
+            "The provider rejected the request as invalid.",
+            status_code=400,
+        ) from exc
+    except AllProvidersFailed as exc:
+        log.warning("no provider could answer: %s", exc)
+        raise GatewayError(
+            ErrorCode.ALL_PROVIDERS_UNAVAILABLE,
+            "No provider could answer the request.",
+            status_code=502,
+        ) from exc
+
+    outcome.provider = completion.provider
+    outcome.breaker_state = completion.breaker_state
+    if completion.failed_over:
+        state.metrics.record_failover()
+    return completion.response
 
 
 async def _release_for_hit(limiter: Any, reservation: Any) -> None:

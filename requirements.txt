@@ -13,9 +13,6 @@
 #
 # Deliberately absent until the slice that needs them, so that nothing
 # speculative is installed:
-#   tiktoken                  the limiter is not built, and tiktoken downloads
-#                             BPE files from the network on first use, which
-#                             would make CI flaky
 #   openai, anthropic         not needed: the adapters speak to the provider
 #                             APIs over httpx directly
 #   sentence-transformers     replaced by the ONNX runtime chromadb already
@@ -36,6 +33,13 @@ pydantic-settings==2.15.0
 
 # state
 redis==8.1.0
+
+# Token counting for the rate limiter, which admits a request on an estimate of
+# what it will cost and so needs a count that agrees with the provider's. It
+# downloads its vocabulary the first time an encoding is loaded, which took 18
+# seconds on the machine this was checked on, so it is loaded at startup and never
+# on a request, and CI tests it with an injected encoding rather than the download.
+tiktoken==0.14.0
 
 # Tier 2 vector store and embedding runtime. chromadb brings onnxruntime and
 # tokenizers with it, which is enough to run all-MiniLM-L6-v2, the model the
