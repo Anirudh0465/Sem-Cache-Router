@@ -51,7 +51,7 @@ from app.models import (
 from app.providers.base import ProviderError
 from app.providers.router import AllProvidersFailed
 from app.telemetry.request_record import RequestOutcome, breaker_state_of, record_request
-from app.telemetry.tracing import request_span
+from app.telemetry.tracing import child_span, request_span
 
 router = APIRouter(tags=["chat"])
 
@@ -155,18 +155,19 @@ async def _serve(
             )
 
     # Step 4. Tier 1.
-    try:
-        cached = await state.cache.get(payload.model, payload.messages)
-    except Exception as exc:
-        # Fail closed. Admission is a no-op today, so a pass through would be
-        # possible, but the ordering contract is the invariant being protected:
-        # a gateway whose failure behaviour changes once the limiter ships is
-        # one nobody can reason about.
-        raise GatewayError(
-            ErrorCode.DEPENDENCY_UNAVAILABLE,
-            "Cache is unreachable, so admission cannot be decided.",
-            status_code=503,
-        ) from exc
+    with child_span("cache tier1 lookup", state):
+        try:
+            cached = await state.cache.get(payload.model, payload.messages)
+        except Exception as exc:
+            # Fail closed. Admission is a no-op today, so a pass through would be
+            # possible, but the ordering contract is the invariant being protected:
+            # a gateway whose failure behaviour changes once the limiter ships is
+            # one nobody can reason about.
+            raise GatewayError(
+                ErrorCode.DEPENDENCY_UNAVAILABLE,
+                "Cache is unreachable, so admission cannot be decided.",
+                status_code=503,
+            ) from exc
 
     if cached is not None:
         await _release_for_hit(limiter, reservation)
@@ -177,7 +178,8 @@ async def _serve(
 
     # Step 5. Tier 2, only after an exact miss, since embedding is the
     # expensive step and an exact repeat does not need it.
-    semantic = await _lookup_tier2(state, payload)
+    with child_span("cache tier2 lookup", state):
+        semantic = await _lookup_tier2(state, payload)
     if semantic is not None:
         await _release_for_hit(limiter, reservation)
         metrics.record_tier2_hit()
@@ -191,8 +193,11 @@ async def _serve(
             similarity=semantic.similarity,
         )
 
-    # Steps 6 and 7. The provider call, through its breaker, with failover.
-    provider_response = await _complete(state, payload, outcome)
+    # Steps 6 and 7. The provider call, through its breaker, with failover. The
+    # child span covers the whole of it, so a failover shows in the trace as one
+    # span that took two attempts rather than as unexplained latency.
+    with child_span(f"provider call {payload.model}", state):
+        provider_response = await _complete(state, payload, outcome)
 
     # Step 8. Write through and reconcile.
     body = _to_body(provider_response, payload.model)
