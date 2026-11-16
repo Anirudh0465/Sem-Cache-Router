@@ -124,6 +124,8 @@ kubernetes==37.0.1
     # via chromadb
 librt==0.16.0
     # via mypy
+lupa==2.8
+    # via fakeredis
 markdown-it-py==4.2.0
     # via rich
 mdurl==0.1.2
@@ -262,11 +264,14 @@ referencing==0.37.0
     # via
     #   jsonschema
     #   jsonschema-specifications
+regex==2026.11.9
+    # via tiktoken
 requests==2.34.2
     # via
     #   kubernetes
     #   opentelemetry-exporter-otlp-proto-http
     #   requests-oauthlib
+    #   tiktoken
 requests-oauthlib==2.0.0
     # via kubernetes
 rich==15.0.0
@@ -289,6 +294,8 @@ starlette==1.8.0
     # via fastapi
 tenacity==9.2.1
     # via chromadb
+tiktoken==0.14.0
+    # via -r requirements.txt
 tokenizers==0.23.3
     # via chromadb
 tqdm==4.70.1
